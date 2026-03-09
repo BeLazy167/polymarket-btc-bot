@@ -1,0 +1,46 @@
+mode: paper
+logLevel: debug
+
+# markets auto-discovered from Gamma API — no static IDs needed
+
+models:
+  fiveMin: fat-tails
+  garchOmega: 0.000001
+  garchAlpha: 0.1
+  garchBeta: 0.85
+  studentTNu: 7
+  ewmaLambda: 0.94
+
+strategies:
+  momentum:
+    enabled: false
+  lowVolRider:
+    enabled: true
+    activateLastSec: 60
+    minSigmaGap: 3
+    minFairValue: 0.90
+    maxEntryPrice: 0.85
+  fairValueArb:
+    enabled: true
+    minGap: 0.10
+    minFairValue: 0.70
+    maxEntryPrice: 0.75
+    exitAtFairValue: true
+    takeProfitCents: 0.10
+  value:
+    enabled: false
+
+timeFilter:
+  skipDays: []
+
+risk:
+  positionSizeUsdc: 2.50
+  maxDailyLossUsdc: 25
+  maxConcurrentPositions: 2
+  maxMomentumEntryPrice: 0.75
+  maxRiderEntryPrice: 0.85
+
+telegram:
+  enabled: false
+  botToken: ""
+  chatId: ""

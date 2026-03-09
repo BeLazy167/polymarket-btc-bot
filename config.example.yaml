@@ -1,0 +1,69 @@
+mode: paper  # 'paper' or 'live'
+logLevel: info
+
+markets:
+  - id: btc-5m-up
+    name: "BTC 5-min Up/Down"
+    yesTokenId: "YOUR_YES_TOKEN_ID"
+    noTokenId: "YOUR_NO_TOKEN_ID"
+    conditionId: "0xYOUR_CONDITION_ID"
+    referencePrice: 60000
+    windowDurationSec: 300
+    tickSize: "0.01"
+    negRisk: false
+
+models:
+  fiveMin: fat-tails
+  fifteenMin: fat-tails
+  oneHour: classic
+  oneDay: garch
+  volSwitchMultiplier: 2
+  garchOmega: 0.000001
+  garchAlpha: 0.1
+  garchBeta: 0.85
+  studentTNu: 7
+  ewmaLambda: 0.94
+
+strategies:
+  momentum:
+    enabled: true
+    entryThreshold: 0.8      # enter after 80% of window
+    minEdge: 0.05            # 5¢ minimum edge
+  lowVolRider:
+    enabled: true
+    activateLastSec: 60      # last 60 seconds
+    minSigmaGap: 3           # 3σ = reversal prob < 0.1%
+    minFairValue: 0.90
+    maxEntryPrice: 0.85
+  fairValueArb:
+    enabled: true
+    minGap: 0.10             # trigger when FV - market >= 10¢
+    minFairValue: 0.70       # only when FV is confident (70%+)
+    maxEntryPrice: 0.75      # dynamically raised: 25¢+ gap → up to 92¢
+  value:
+    enabled: true
+    discountThreshold: 0.20  # buy when 20% below FV
+    exitThreshold: 0.05      # sell when within 5% of FV
+    maxEntryPrice: 0.10      # never buy above 10¢
+    minProfitTarget: 2       # sell at 2x entry
+
+risk:
+  positionSizeUsdc: 2.50       # 1% of $250 bankroll
+  maxDailyLossUsdc: 25         # 10% of bankroll — halt if hit
+  maxConcurrentPositions: 2
+  maxMomentumEntryPrice: 0.75  # don't buy above 75¢ for momentum
+  maxRiderEntryPrice: 0.85     # don't buy above 85¢ for low-vol rider
+
+telegram:
+  enabled: false
+  botToken: ""
+  chatId: ""
+
+# Auth — prefer env vars over config file for secrets
+polymarket:
+  privateKey: ""
+  apiKey: ""
+  apiSecret: ""
+  apiPassphrase: ""
+  signatureType: 1
+  funderAddress: ""
