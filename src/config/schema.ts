@@ -84,10 +84,8 @@ const FairValueArbSchema = v.object({
   exitAtFairValue: v.optional(v.boolean(), true),
   /** Exit when bid >= entry + this amount (e.g., 0.10 = 10¢ profit). 0 = disabled */
   takeProfitCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.10),
-  /** Trailing stop: exit when bid drops this far below peak (e.g., 0.03 = 3¢). 0 = disabled */
-  trailingStopCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.05),
-  /** Trailing stop activates after bid is this far above entry (e.g., 0.07 = 7¢) */
-  trailingActivationCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.07),
+  /** FV ratchet width: floor = max(floor, fvPeak - this). Wider = more room before exit */
+  fvRatchetWidth: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.15),
 })
 
 const ValueStrategySchema = v.object({
