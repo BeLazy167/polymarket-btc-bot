@@ -1,5 +1,6 @@
 import { loadConfig } from './config/markets.ts'
-import type { MarketConfig, ModelConfig, TickSize } from './config/schema.ts'
+import type { MarketConfig, ModelConfig, TickSize, Config } from './config/schema.ts'
+import { getTimeframeBucket, getWindowMeta } from './config/markets.ts'
 import { PriceStore } from './data/price-store.ts'
 import { createBinanceWS } from './data/binance-ws.ts'
 import { createPolymarketWS, type OrderbookState } from './data/polymarket-ws.ts'
@@ -21,8 +22,6 @@ import { logger, stdout, color, banner, tag, progressBar, box } from './monitori
 
 const CONFIG_PATH = process.argv[2] ?? 'config.yaml'
 const MINUTES_PER_YEAR = 365.25 * 24 * 60
-const WINDOW_SEC = 300
-const MARKET_ID = 'btc-5m'
 
 /** Max age of data before we consider it stale and skip trading */
 const MAX_PRICE_STALE_MS = 5_000
@@ -30,6 +29,8 @@ const MAX_BOOK_STALE_MS = 10_000
 
 async function main() {
   const config = await loadConfig(CONFIG_PATH)
+  const WINDOW_SEC = config.windowDurationSec
+  const { marketId: MARKET_ID, label: WINDOW_LABEL } = getWindowMeta(WINDOW_SEC)
   logger.level = config.logLevel
   banner([
     `${color.bold('POLYMARKET BTC BOT')}`,
@@ -122,7 +123,7 @@ async function main() {
 
       // Track minute prices for momentum strategy
       if (currentMarket) {
-        const windowKey = `btc-5m-${currentMarket.epoch}`
+        const windowKey = `${MARKET_ID}-${currentMarket.epoch}`
         momentumStrategy.recordMinutePrice(price, windowKey, Date.now())
       }
     },
@@ -165,12 +166,12 @@ async function main() {
   async function refreshMarket() {
     if (refreshing) return
     if (Date.now() - lastFailedRefresh < 10_000) return // backoff 10s after failed fetch
-    const newEpoch = getWindowEpoch(Date.now())
+    const newEpoch = getWindowEpoch(Date.now(), WINDOW_SEC)
     if (newEpoch === currentEpoch && currentMarket) return
 
     refreshing = true
     try {
-      const market = await fetchCurrentMarket()
+      const market = await fetchCurrentMarket(WINDOW_SEC)
       if (!market) {
         logger.error('Failed to fetch market from Gamma API')
         lastFailedRefresh = Date.now()
@@ -181,20 +182,21 @@ async function main() {
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
-      const openPrice = await fetchOpenPrice(market.epoch)
-      if (!openPrice) {
-        stdout(`${tag.warn} Open price unavailable — skipping window`)
+      const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+
+      if (!refPrice) {
+        stdout(`${tag.warn} Ref price unavailable — skipping window`)
         lastFailedRefresh = Date.now()
-        return // don't update currentMarket/currentEpoch so we retry next tick
+        return
       }
 
-      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + openPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow('15s')}`)
-      await Bun.sleep(15_000)
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow('5s')}`)
+      await Bun.sleep(5_000)
 
       // Commit state AFTER sleep so tick loop won't trade during wait
       currentMarket = market
       currentEpoch = newEpoch
-      referencePrice = openPrice
+      referencePrice = refPrice
       stdout(`${color.dim('─'.repeat(50))}`)
     } finally {
       refreshing = false
@@ -221,14 +223,16 @@ async function main() {
       const currentPrice = lastPrice
       if (!currentPrice) return
 
-      // --- Window rotation: check if we've entered a new 5-min window ---
-      const newEpoch = getWindowEpoch(now)
+      // --- Window rotation ---
+      const newEpoch = getWindowEpoch(now, WINDOW_SEC)
       if (newEpoch !== currentEpoch) {
         // Resolve any open trades from previous window — attempt real sell first
         if (currentMarket) {
-          const prevKey = `btc-5m-${currentMarket.epoch}`
+          const prevKey = `${MARKET_ID}-${currentMarket.epoch}`
           const trade = !sellingInProgress.has(prevKey) ? openTrades.get(prevKey) : undefined
           if (trade) {
+            sellingInProgress.add(prevKey)
+            try {
             const tokenId = trade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
             const shares = trade.sizeUsdc / trade.entryPrice
 
@@ -238,7 +242,9 @@ async function main() {
             if (sellResult.success) {
               const exitBook = orderbookStates.get(tokenId)
               const exitBid = exitBook?.bestBid ?? 0
-              const revenue = shares * Math.max(exitBid, 0.01) * 0.98
+              const soldShares = sellResult.filledShares ?? shares
+              const exitPrice = sellResult.fillPrice ?? exitBid
+              const revenue = sellResult.revenue ?? soldShares * Math.max(exitBid, 0.01) * 0.98
               const pnl = revenue - trade.sizeUsdc
 
               riskManager.recordTrade(MARKET_ID, pnl)
@@ -246,9 +252,9 @@ async function main() {
               if (pnl > 0) winCount++
 
               const holdSec = Math.round((Date.now() - trade.entryTime) / 1000)
-              stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')}`)
-              logger.info({ side: trade.side, entry: trade.entryPrice, pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
-              alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice: exitBid, pnl, reason: 'window expiry', holdSec }).catch(() => {})
+              stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')}`)
+              logger.info({ side: trade.side, entry: trade.entryPrice, exitPrice, soldShares, revenue: revenue.toFixed(2), pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
+              alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice, pnl, reason: 'window expiry', holdSec, soldShares, revenue }).catch(() => {})
             } else {
               // Fall back to paper settlement
               const btcWentUp = currentPrice >= trade.refPrice
@@ -275,6 +281,9 @@ async function main() {
             }
 
             openTrades.delete(prevKey)
+            } finally {
+              sellingInProgress.delete(prevKey)
+            }
           }
         }
 
@@ -311,7 +320,7 @@ async function main() {
       if (elapsed < 0 || elapsed > WINDOW_SEC) return
 
       // Get volatility + fair value
-      const sigma = getSigma(config.models, priceStore, ewmaVar, garchVar)
+      const sigma = getSigma(config.models, priceStore, ewmaVar, garchVar, WINDOW_SEC)
       if (!Number.isFinite(sigma) || sigma <= 0) {
         logger.debug({ sigma }, 'No valid vol estimate yet')
         return
@@ -335,7 +344,7 @@ async function main() {
       }
 
       // Build strategy context
-      const windowKey = `btc-5m-${currentMarket.epoch}`
+      const windowKey = `${MARKET_ID}-${currentMarket.epoch}`
       const ctx: StrategyContext = {
         currentPrice,
         referencePrice,
@@ -379,9 +388,15 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Edge-relative trailing stop: activation at 40% of edge, stop width at 25% of edge
+        // Fixed take-profit at 15¢
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.15) {
+          shouldExit = true
+          exitReason = `TP 15¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+        }
+
+        // Edge-relative trailing stop: activation at 40% of edge, stop width at 60% of edge
         if (!shouldExit && existingTrade.peakBid) {
-          const stopWidth = existingTrade.edge * 0.25
+          const stopWidth = existingTrade.edge * 0.60
           const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
           if (profitFromEntry >= existingTrade.edge * 0.40 && exitBid > 0 && exitBid <= existingTrade.peakBid - stopWidth) {
             shouldExit = true
@@ -406,16 +421,23 @@ async function main() {
 
             if (!sellResult.success) {
               existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
-              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures }, 'Sell order failed — retrying next tick')
-              if (existingTrade.sellFailures % 5 === 0) {
-                alerts.sendErrorAlert(`Sell failed ${existingTrade.sellFailures}x — still retrying\n${existingTrade.side} @ ${(existingTrade.entryPrice * 100).toFixed(0)}¢ · ${existingTrade.strategy}`).catch(() => {})
+              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures, remaining: sellResult.remaining }, 'Sell failed — retrying next tick')
+              if (existingTrade.sellFailures % 3 === 0) {
+                alerts.sendSellFailureAlert({
+                  side: existingTrade.side,
+                  entryPrice: existingTrade.entryPrice,
+                  strategy: existingTrade.strategy,
+                  remaining: sellResult.remaining ?? shares,
+                  attempts: existingTrade.sellFailures,
+                  error: sellResult.error,
+                }).catch(() => {})
               }
               return
             }
 
             const soldShares = sellResult.filledShares ?? shares
-            const exitPrice = soldShares > 0 ? (soldShares * exitBid * 0.98) / soldShares : exitBid
-            const revenue = soldShares * exitBid * 0.98 // 2% fee on exit
+            const actualExitPrice = sellResult.fillPrice ?? exitBid
+            const revenue = sellResult.revenue ?? soldShares * exitBid * 0.98
             const pnl = revenue - existingTrade.sizeUsdc
 
             riskManager.recordTrade(MARKET_ID, pnl)
@@ -423,13 +445,15 @@ async function main() {
             if (pnl > 0) winCount++
 
             const holdSec = Math.round((Date.now() - existingTrade.entryTime) / 1000)
-            stdout(`${tag.sell} ${color.bold(existingTrade.side)} ${(existingTrade.entryPrice * 100).toFixed(0)}¢${color.dim(box.arrow)}${(exitBid * 100).toFixed(0)}¢ ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')} ${color.dim('$' + revenue.toFixed(2))} ${color.dim(exitReason)}`)
+            stdout(`${tag.sell} ${color.bold(existingTrade.side)} ${(existingTrade.entryPrice * 100).toFixed(0)}¢${color.dim(box.arrow)}${(actualExitPrice * 100).toFixed(0)}¢ ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')} ${color.dim('$' + revenue.toFixed(2))} ${color.dim(exitReason)}`)
 
             logger.info({
               side: existingTrade.side,
               entry: existingTrade.entryPrice,
-              exit: exitBid,
+              exit: actualExitPrice,
               soldShares,
+              remaining: sellResult.remaining,
+              revenue: revenue.toFixed(2),
               pnl: pnl.toFixed(2),
               reason: exitReason,
             }, pnl > 0 ? 'EXIT — profit' : 'EXIT — loss')
@@ -438,10 +462,12 @@ async function main() {
               strategy: existingTrade.strategy,
               side: existingTrade.side,
               entryPrice: existingTrade.entryPrice,
-              exitPrice: exitBid,
+              exitPrice: actualExitPrice,
               pnl,
               reason: exitReason,
               holdSec,
+              soldShares,
+              revenue,
             }).catch(() => {})
 
             openTrades.delete(windowKey)
@@ -486,7 +512,7 @@ async function main() {
 
         const marketConfig: MarketConfig = {
           id: MARKET_ID,
-          name: `BTC 5m ${currentMarket.slug}`,
+          name: `BTC ${WINDOW_LABEL} ${currentMarket.slug}`,
           yesTokenId: currentMarket.yesTokenId,
           noTokenId: currentMarket.noTokenId,
           conditionId: currentMarket.conditionId,
@@ -601,9 +627,11 @@ function getSigma(
   store: PriceStore,
   ewmaVar: number,
   garchVar: number,
+  windowSec: number,
 ): number {
   // Prefer GARCH if configured and warm, then EWMA, then rolling, then default
-  const varianceToUse = (models.fiveMin === 'garch' && garchVar > 0) ? garchVar
+  const bucket = getTimeframeBucket(windowSec)
+  const varianceToUse = (models[bucket] === 'garch' && garchVar > 0) ? garchVar
     : ewmaVar > 0 ? ewmaVar
     : 0
 

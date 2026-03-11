@@ -147,6 +147,8 @@ export const ConfigSchema = v.object({
   risk: v.optional(RiskSchema, {}),
   telegram: v.optional(TelegramSchema, {}),
   polymarket: PolymarketAuthSchema,
+  /** Window duration in seconds (300 = 5m, 900 = 15m) */
+  windowDurationSec: v.optional(v.pipe(v.number(), v.minValue(60)), 300),
   /** Log level */
   logLevel: v.optional(v.picklist(['debug', 'info', 'warn', 'error']), 'info'),
 })

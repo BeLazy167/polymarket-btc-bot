@@ -1,4 +1,5 @@
 import { logger } from '../monitoring/logger.ts'
+import { getWindowMeta } from '../config/markets.ts'
 
 export interface LiveMarket {
   epoch: number
@@ -14,23 +15,23 @@ export interface LiveMarket {
 }
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com/events/slug'
-const WINDOW_SEC = 300
 
 /**
- * Computes the current 5-min window epoch (floor-aligned to 300s).
+ * Computes the current window epoch (floor-aligned to windowSec).
  * Optionally offset by +1 to get the next window.
  */
-export function getWindowEpoch(nowMs: number, offset = 0): number {
+export function getWindowEpoch(nowMs: number, windowSec: number, offset = 0): number {
   const nowSec = Math.floor(nowMs / 1000)
-  return Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC + offset * WINDOW_SEC
+  return Math.floor(nowSec / windowSec) * windowSec + offset * windowSec
 }
 
 /**
- * Fetches market data for a specific 5-min window epoch from Gamma API.
+ * Fetches market data for a specific window epoch from Gamma API.
  * Returns null if market doesn't exist yet (e.g. too far in future).
  */
-export async function fetchMarket(epoch: number): Promise<LiveMarket | null> {
-  const slug = `btc-updown-5m-${epoch}`
+export async function fetchMarket(epoch: number, windowSec: number): Promise<LiveMarket | null> {
+  const { slugPrefix } = getWindowMeta(windowSec)
+  const slug = `${slugPrefix}${epoch}`
   const url = `${GAMMA_BASE}/${slug}`
 
   const res = await fetch(url)
@@ -83,17 +84,17 @@ export async function fetchMarket(epoch: number): Promise<LiveMarket | null> {
     negRisk: data.negRisk ?? false,
     minOrderSize,
     windowStartMs: epoch * 1000,
-    windowEndMs: (epoch + WINDOW_SEC) * 1000,
+    windowEndMs: (epoch + windowSec) * 1000,
   }
 }
 
 /**
  * Fetches current window market. Retries up to 3 times with 2s delay.
  */
-export async function fetchCurrentMarket(): Promise<LiveMarket | null> {
-  const epoch = getWindowEpoch(Date.now())
+export async function fetchCurrentMarket(windowSec: number): Promise<LiveMarket | null> {
+  const epoch = getWindowEpoch(Date.now(), windowSec)
   for (let attempt = 0; attempt < 3; attempt++) {
-    const market = await fetchMarket(epoch)
+    const market = await fetchMarket(epoch, windowSec)
     if (market) return market
     if (attempt < 2) await Bun.sleep(2000)
   }
@@ -101,13 +102,14 @@ export async function fetchCurrentMarket(): Promise<LiveMarket | null> {
 }
 
 /**
- * Fetches the exact BTC open price for a 5-min window from Polymarket's crypto-price API.
- * This is the same price Polymarket uses for settlement.
+ * Fetches BTC open price from Polymarket's crypto-price API.
+ * Uses ISO dates and correct variant names (e.g. 'fifteen' not 'fifteenminute').
  */
-export async function fetchOpenPrice(epochSec: number): Promise<number | null> {
+export async function fetchOpenPrice(epochSec: number, windowSec: number): Promise<number | null> {
+  const { cryptoVariant } = getWindowMeta(windowSec)
   const start = new Date(epochSec * 1000).toISOString()
-  const end = new Date((epochSec + WINDOW_SEC) * 1000).toISOString()
-  const url = `https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=${start}&variant=fiveminute&endDate=${end}`
+  const end = new Date((epochSec + windowSec) * 1000).toISOString()
+  const url = `https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=${start}&variant=${cryptoVariant}&endDate=${end}`
 
   const res = await fetch(url)
   if (!res.ok) {

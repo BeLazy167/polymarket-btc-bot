@@ -42,3 +42,15 @@ export function getTimeframeBucket(windowDurationSec: number): 'fiveMin' | 'fift
   if (windowDurationSec <= 3600) return 'oneHour'
   return 'oneDay'
 }
+
+const BUCKET_META = {
+  fiveMin:    { slugPrefix: 'btc-updown-5m-',  cryptoVariant: 'fiveminute',    marketId: 'btc-5m',  label: '5m'  },
+  fifteenMin: { slugPrefix: 'btc-updown-15m-', cryptoVariant: 'fifteen',       marketId: 'btc-15m', label: '15m' },
+  oneHour:    { slugPrefix: 'btc-updown-1h-',  cryptoVariant: 'onehour',       marketId: 'btc-1h',  label: '1h'  },
+  oneDay:     { slugPrefix: 'btc-updown-1d-',  cryptoVariant: 'oneday',        marketId: 'btc-1d',  label: '1d'  },
+} as const
+
+/** Single source of truth for window-duration-derived metadata */
+export function getWindowMeta(windowSec: number) {
+  return BUCKET_META[getTimeframeBucket(windowSec)]
+}

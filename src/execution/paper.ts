@@ -39,7 +39,7 @@ export class PaperExecutor implements Executor {
 
   async sell(tokenId: string, shares: number, _tickSize: TickSize): Promise<ExecutionResult> {
     logger.info({ tokenId, shares, side: 'SELL', mode: 'PAPER' }, 'Paper SELL executed')
-    return { success: true, orderId: `paper-sell-${Date.now()}`, status: 'simulated' }
+    return { success: true, orderId: `paper-sell-${Date.now()}`, status: 'simulated', filledShares: shares, remaining: 0 }
   }
 
   getTrades() {

@@ -22,6 +22,17 @@ export interface ExitAlertData {
   pnl: number
   reason: string
   holdSec: number
+  soldShares?: number
+  revenue?: number
+}
+
+export interface SellFailureData {
+  side: 'YES' | 'NO'
+  entryPrice: number
+  strategy: string
+  remaining: number
+  attempts: number
+  error?: string
 }
 
 /**
@@ -162,14 +173,26 @@ export function createAlerts(config: AlertsConfig) {
       sessionPnl += data.pnl
       if (data.pnl > 0) sessionWins++
 
+      const sharesLine = data.soldShares != null ? `\nSold: ${data.soldShares.toFixed(1)} shares · Rev: $${(data.revenue ?? 0).toFixed(2)}` : ''
       const msg = [
         `${pnlEmoji(data.pnl)} <b>EXIT ${fmtPnl(data.pnl)}</b>`,
         ``,
-        `<b>${data.side}</b> ${(data.entryPrice * 100).toFixed(0)}¢ → ${(data.exitPrice * 100).toFixed(0)}¢ · ${data.holdSec}s`,
+        `<b>${data.side}</b> ${(data.entryPrice * 100).toFixed(0)}¢ → ${(data.exitPrice * 100).toFixed(0)}¢ · ${data.holdSec}s${sharesLine}`,
         `<i>${data.strategy}</i> · ${data.reason}`,
         ``,
         statsLine(),
       ].join('\n')
+      await send(msg)
+    },
+
+    async sendSellFailureAlert(data: SellFailureData): Promise<void> {
+      const msg = [
+        `🔴 <b>SELL FAILED</b> (attempt ${data.attempts})`,
+        ``,
+        `<b>${data.side}</b> @ ${(data.entryPrice * 100).toFixed(0)}¢ · ${data.remaining.toFixed(1)} shares remain`,
+        `<i>${data.strategy}</i>`,
+        data.error ? `<code>${data.error}</code>` : '',
+      ].filter(Boolean).join('\n')
       await send(msg)
     },
 
