@@ -35,6 +35,8 @@ export class ValueStrategy implements Strategy {
   ): Signal | null {
     const buyThreshold = fairValue * (1 - this.config.discountThreshold)
 
+    if (fairValue < this.config.minFairValue) return null
+
     if (marketPrice < buyThreshold && marketPrice <= this.config.maxEntryPrice) {
       const edge = fairValue - marketPrice
       return {

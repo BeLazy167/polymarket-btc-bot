@@ -59,6 +59,7 @@ const STREAM_URLS: Record<BinanceStreamType, string> = {
 }
 
 const MAX_BACKOFF_MS = 30_000
+const HEARTBEAT_TIMEOUT_MS = 15_000
 
 export function createBinanceWS(options: BinanceWSOptions): { connect: () => void; close: () => void } {
   const streamType = options.stream ?? 'aggTrade'
@@ -68,6 +69,8 @@ export function createBinanceWS(options: BinanceWSOptions): { connect: () => voi
   let shouldReconnect = true
   let backoffMs = 1000
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let lastMessageAt = 0
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 
   function parsePrice(data: BinanceEvent): { price: number; timestamp: number } | null {
     switch (data.e) {
@@ -86,16 +89,35 @@ export function createBinanceWS(options: BinanceWSOptions): { connect: () => voi
     }
   }
 
+  function stopHeartbeat() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+
+  function startHeartbeat() {
+    stopHeartbeat()
+    lastMessageAt = Date.now()
+    heartbeatTimer = setInterval(() => {
+      if (Date.now() - lastMessageAt > HEARTBEAT_TIMEOUT_MS) {
+        stopHeartbeat()
+        options.onError?.(new Error('Binance WS heartbeat timeout — force reconnecting'))
+        ws?.close()
+      }
+    }, 5_000)
+  }
+
   function connect() {
     shouldReconnect = true
     ws = new WebSocket(url)
 
     ws.onopen = () => {
       backoffMs = 1000
+      startHeartbeat()
       options.onConnect?.()
     }
 
     ws.onmessage = (event: MessageEvent) => {
+      lastMessageAt = Date.now()
       let data: BinanceEvent
       try {
         data = JSON.parse(event.data as string) as BinanceEvent
@@ -113,6 +135,7 @@ export function createBinanceWS(options: BinanceWSOptions): { connect: () => voi
     }
 
     ws.onclose = () => {
+      stopHeartbeat()
       options.onDisconnect?.()
       if (!shouldReconnect) return
       reconnectTimer = setTimeout(() => {
@@ -124,6 +147,7 @@ export function createBinanceWS(options: BinanceWSOptions): { connect: () => voi
 
   function close() {
     shouldReconnect = false
+    stopHeartbeat()
     if (reconnectTimer) clearTimeout(reconnectTimer)
     ws?.close()
     ws = null

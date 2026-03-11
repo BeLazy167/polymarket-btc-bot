@@ -8,9 +8,9 @@ export interface LiveMarket {
   noTokenId: string
   tickSize: string
   negRisk: boolean
+  minOrderSize: number
   windowStartMs: number
   windowEndMs: number
-  priceToBeat: number | null
 }
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com/events/slug'
@@ -41,7 +41,6 @@ export async function fetchMarket(epoch: number): Promise<LiveMarket | null> {
 
   const data = await res.json() as {
     negRisk?: boolean
-    eventMetadata?: { priceToBeat?: number }
     markets?: Array<{
       conditionId: string
       clobTokenIds: string
@@ -61,6 +60,19 @@ export async function fetchMarket(epoch: number): Promise<LiveMarket | null> {
     return null
   }
 
+  // Fetch min_order_size from CLOB orderbook
+  let minOrderSize = 5 // safe fallback
+  try {
+    const obRes = await fetch(`https://clob.polymarket.com/orderbook/${tokenIds[0]}`)
+    if (obRes.ok) {
+      const ob = await obRes.json() as { min_order_size?: string }
+      const parsed = Number(ob.min_order_size)
+      if (Number.isFinite(parsed) && parsed > 0) minOrderSize = parsed
+    }
+  } catch {
+    logger.warn({ slug }, 'Failed to fetch min_order_size — using default 5')
+  }
+
   return {
     epoch,
     slug,
@@ -69,9 +81,9 @@ export async function fetchMarket(epoch: number): Promise<LiveMarket | null> {
     noTokenId: tokenIds[1]!,
     tickSize: String(market.orderPriceMinTickSize ?? '0.01'),
     negRisk: data.negRisk ?? false,
+    minOrderSize,
     windowStartMs: epoch * 1000,
     windowEndMs: (epoch + WINDOW_SEC) * 1000,
-    priceToBeat: data.eventMetadata?.priceToBeat ?? null,
   }
 }
 
@@ -89,22 +101,26 @@ export async function fetchCurrentMarket(): Promise<LiveMarket | null> {
 }
 
 /**
- * Polls Gamma API for `eventMetadata.priceToBeat` for a given epoch.
- * Returns the exact reference price Polymarket uses, or null if not yet available.
- * priceToBeat typically appears ~60-90s after the window starts.
+ * Fetches the exact BTC open price for a 5-min window from Polymarket's crypto-price API.
+ * This is the same price Polymarket uses for settlement.
  */
-export async function fetchPriceToBeat(epoch: number): Promise<number | null> {
-  const slug = `btc-updown-5m-${epoch}`
-  const url = `${GAMMA_BASE}/${slug}`
+export async function fetchOpenPrice(epochSec: number): Promise<number | null> {
+  const start = new Date(epochSec * 1000).toISOString()
+  const end = new Date((epochSec + WINDOW_SEC) * 1000).toISOString()
+  const url = `https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=${start}&variant=fiveminute&endDate=${end}`
 
   const res = await fetch(url)
-  if (!res.ok) return null
-
-  const data = await res.json() as { eventMetadata?: { priceToBeat?: number } }
-  const ptb = data?.eventMetadata?.priceToBeat
-  if (typeof ptb === 'number' && ptb > 1000) {
-    logger.info({ epoch, priceToBeat: ptb }, 'Got priceToBeat from Gamma')
-    return ptb
+  if (!res.ok) {
+    logger.error({ status: res.status, epochSec }, 'crypto-price API fetch failed')
+    return null
   }
-  return null
+
+  const data = await res.json() as { openPrice?: number | null }
+  if (!data.openPrice || !Number.isFinite(data.openPrice)) {
+    logger.warn({ epochSec, data }, 'crypto-price API returned no openPrice')
+    return null
+  }
+
+  logger.info({ epochSec, openPrice: data.openPrice }, 'Fetched open price from Polymarket')
+  return data.openPrice
 }

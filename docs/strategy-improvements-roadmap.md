@@ -88,12 +88,151 @@ Track realized vs predicted edge over time:
 
 ---
 
+## Cross-Market Arbitrage (from "Unravelling the Probabilistic Forest" paper)
+
+> Paper analyzed 86M Polymarket transactions (Apr 2024–Apr 2025). Sophisticated traders extracted **$40M in guaranteed arbitrage**. Top trader: $2M from 4,049 trades ($496/trade avg). Three tiers of increasing complexity.
+
+### 10. Single-Condition Arbitrage Scanner
+**Priority: HIGH | Effort: LOW**
+
+Scan all active Polymarket binary markets for YES+NO ≠ $1. Buy both when sum < $1 (guaranteed profit on resolution). Paper found **$10.6M** extracted this way.
+
+- Poll Gamma API for all active binary markets (not just BTC 5-min)
+- Subscribe to orderbook for each via Polymarket WS
+- When `bestAsk_YES + bestAsk_NO < 1.0 - fee` → buy both
+- When `bestBid_YES + bestBid_NO > 1.0 + fee` → sell both
+- FOK execution on both legs simultaneously
+- Requires: multi-market WS subscriptions (already supported), new market scanner module
+
+### 11. Multi-Condition Rebalancing
+**Priority: HIGH | Effort: MEDIUM**
+
+For multi-outcome markets (e.g., "Which party wins X?" with 3+ outcomes), all outcome prices must sum to $1. Paper found **$29M** extracted from internal mispricing — median sum was $0.60 (40% mispricing).
+
+- Fetch multi-outcome markets from Gamma API (elections, sports, etc.)
+- Check if sum of all outcome best-asks < $1 → buy all outcomes
+- Check if sum of all outcome best-bids > $1 → sell all outcomes
+- Requires: extending `MarketConfig` to support N-outcome markets, new rebalancing strategy
+
+### 12. Cross-Market Dependency Detection (LLM-Powered)
+**Priority: MEDIUM | Effort: HIGH**
+
+Detect logical dependencies between independently-priced markets. Example: "Trump wins PA" implies "Republicans win PA by 5+" — if A→B then P(A) ≤ P(B) must hold. Paper found **$95K** in combinatorial tier.
+
+- Fetch all active market descriptions from Gamma API
+- Use Claude API to classify market pairs: dependent vs independent
+- Output: JSON of valid/invalid outcome combinations per pair
+- Linear constraint check: if A→B, verify price(A) ≤ price(B)
+- Paper: out of 46,360 pairs, 1,576 potentially dependent, 13 exploitable
+- Requires: new `src/arbitrage/dependency-detector.ts`, Claude API integration
+
+### 13. Bregman Divergence Trade Sizing
+**Priority: MEDIUM | Effort: HIGH**
+
+Replace `edge = fairValue - marketPrice` with information-theoretic optimal. Paper proved: **max guaranteed profit = Bregman divergence** between current prices and nearest arbitrage-free prices.
+
+```
+D(μ||θ) = R(μ) + C(θ) - θ·μ
+Max Profit = D(μ*||θ)  where μ* = closest arb-free price vector
+```
+
+- Compute nearest arb-free price vector μ* for each market cluster
+- Divergence = exact dollar amount of extractable profit
+- Optimal trade = portfolio that moves prices from θ to μ*
+- Replaces heuristic edge with computable optimal
+- Requires: convex optimization library
+
+### 14. Frank-Wolfe Solver for Exponential Outcome Spaces
+**Priority: LOW | Effort: VERY HIGH**
+
+For complex market clusters (NCAA: 63 games = 2^63 outcomes), enumerate valid outcomes via integer programming constraints. Frank-Wolfe iteratively builds working set without enumerating full space.
+
+- Iterative: start with small valid outcome set, solve, add best new vector, repeat
+- Converges in 50-150 iterations (minutes, not years)
+- Paper used Gurobi (commercial); open-source alternatives: COIN-OR / HiGHS
+- Only needed for complex multi-market clusters (>10 interdependent markets)
+- Requires: IP solver integration, constraint modeling framework
+
+### 15. Execution Simulation Layer
+**Priority: HIGH | Effort: MEDIUM**
+
+Simulate every order against current orderbook before placing. Paper's system only executed when guaranteed profit exceeded threshold after slippage.
+
+- Store full orderbook depth (not just best bid/ask) from Polymarket WS
+- Walk the book: calculate avg fill price for desired size
+- Expected slippage = avg_fill - best_price
+- Only execute if `profit_after_slippage_and_fees > min_threshold`
+- Cap position at 50% of book depth to avoid moving market
+- Requires: extending `OrderbookState` to store depth levels, new `src/execution/simulator.ts`
+
+### 16. Modified Kelly with Execution Risk
+**Priority: MEDIUM | Effort: LOW**
+
+Upgrade item #5 with execution risk from paper:
+
+```
+f = (b×p - q) / (b × √p)
+```
+
+where p = fill probability (estimated from orderbook depth), not just edge probability. Cap at 50% of book depth. Use quarter-Kelly (f/4) for safety.
+
+### 17. Real-Time Monitoring Dashboard
+**Priority: LOW | Effort: MEDIUM**
+
+Web dashboard via `Bun.serve()` tracking:
+
+- Opportunities detected/minute, execution success rate
+- Cumulative P&L curve, current drawdown %
+- Detection-to-execution latency
+- Alerts: drawdown >15%, fill rate <30%, solver timeout
+- Paper's top traders ran 24/7 monitoring with automated halts
+
+### 18. Multi-Market Infrastructure
+**Priority: HIGH | Effort: HIGH**
+
+Prerequisite for items 10-14. Extend bot from single BTC 5-min to scanning all active Polymarket markets.
+
+- Replace `currentMarket` (single) → `Map<marketId, LiveMarket>`
+- Extend Gamma API scanner: fetch all active events, not just `btc-updown-5m-*`
+- Parallel Polymarket WS subscriptions per market group
+- Per-market vol state, fair value, position tracking
+- Risk manager: per-market P&L + portfolio-level exposure limits
+- Files: `src/data/market-discovery.ts`, `src/index.ts`, `src/risk/manager.ts`
+
+---
+
 ## Implementation Order (suggested)
+
+**Phase 1 — Current BTC 5-min improvements:**
 1. Ensemble consensus (run all 3 models, require 2/3 agreement)
 2. Time-weighted edge threshold
 3. Binance order flow (already have aggTrade stream)
 4. Kelly sizing
 5. Multi-frequency vol
 6. Deribit IV integration
+
+**Phase 2 — Low-hanging arbitrage fruit:**
+10. Single-condition arb scanner (quick win, highest $/effort)
+11. Multi-condition rebalancing
+15. Execution simulation layer (needed before scaling capital)
+16. Modified Kelly with execution risk
+
+**Phase 3 — Cross-market infrastructure:**
+18. Multi-market infrastructure (prerequisite for advanced arb)
+12. Cross-market dependency detection (LLM-powered)
+13. Bregman divergence trade sizing
+
+**Phase 4 — Advanced & monitoring:**
 7. Walk-forward backtesting
 8. Edge erosion tracking
+9. Independent verification
+17. Real-time monitoring dashboard
+14. Frank-Wolfe solver (only if market complexity warrants)
+
+---
+
+## Open Questions
+- Capital split between directional BTC trades vs arb?
+- Gamma API rate limits for scanning all markets?
+- Gurobi license ($$$) vs HiGHS/COIN-OR for IP solver?
+- Arb scanner: separate process or integrated main loop?

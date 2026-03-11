@@ -1,10 +1,9 @@
 import { loadConfig } from './config/markets.ts'
-import type { Config, MarketConfig, ModelConfig } from './config/schema.ts'
+import type { MarketConfig, ModelConfig, TickSize } from './config/schema.ts'
 import { PriceStore } from './data/price-store.ts'
 import { createBinanceWS } from './data/binance-ws.ts'
 import { createPolymarketWS, type OrderbookState } from './data/polymarket-ws.ts'
-import { fetchCurrentMarket, fetchPriceToBeat, getWindowEpoch, type LiveMarket } from './data/market-discovery.ts'
-import { readChainlinkBtcPrice } from './data/chainlink.ts'
+import { fetchCurrentMarket, fetchOpenPrice, getWindowEpoch, type LiveMarket } from './data/market-discovery.ts'
 import { classicFairValue } from './models/classic.ts'
 import { fatTailsFairValue } from './models/fat-tails.ts'
 import { ewmaVariance, garchVariance } from './models/math.ts'
@@ -15,15 +14,18 @@ import { FairValueArbStrategy } from './strategies/fair-value-arb.ts'
 import { ValueStrategy } from './strategies/value.ts'
 import type { Strategy } from './strategies/base.ts'
 import { RiskManager } from './risk/manager.ts'
-import { LiveExecutor } from './execution/executor.ts'
+import { LiveExecutor, type Executor } from './execution/executor.ts'
 import { PaperExecutor } from './execution/paper.ts'
-import type { Executor } from './execution/executor.ts'
 import { createAlerts } from './monitoring/alerts.ts'
-import { logger } from './monitoring/logger.ts'
+import { logger, stdout, color, banner, tag, progressBar, box } from './monitoring/logger.ts'
 
 const CONFIG_PATH = process.argv[2] ?? 'config.yaml'
 const MINUTES_PER_YEAR = 365.25 * 24 * 60
 const WINDOW_SEC = 300
+const MARKET_ID = 'btc-5m'
+
+/** GTC limit price = market ask + slippage buffer for fill */
+const GTC_SLIPPAGE = 0.03
 
 /** Max age of data before we consider it stale and skip trading */
 const MAX_PRICE_STALE_MS = 5_000
@@ -32,7 +34,10 @@ const MAX_BOOK_STALE_MS = 10_000
 async function main() {
   const config = await loadConfig(CONFIG_PATH)
   logger.level = config.logLevel
-  logger.info({ mode: config.mode }, 'Bot starting')
+  banner([
+    `${color.bold('POLYMARKET BTC BOT')}`,
+    `${color.dim('mode')} ${color.cyan(config.mode)}  ${color.dim('size')} $${config.risk.positionSizeUsdc}  ${color.dim('max-loss')} $${config.risk.maxDailyLossUsdc}`,
+  ], 'start')
 
   // --- Init components ---
   const priceStore = new PriceStore()
@@ -61,7 +66,7 @@ async function main() {
   if (config.strategies.fairValueArb.enabled) strategies.push(new FairValueArbStrategy(config.strategies.fairValueArb))
   if (config.strategies.value.enabled) strategies.push(new ValueStrategy(config.strategies.value))
 
-  logger.info({ strategies: strategies.map(s => s.name) }, 'Strategies loaded')
+  stdout(`${color.dim(box.arrow)} Strategies: ${color.bold(strategies.map(s => s.name).join(color.dim(' │ ')))}`)
 
   // --- Vol state (updated once per minute, not per tick) ---
   let ewmaVar = 0
@@ -83,10 +88,15 @@ async function main() {
   const orderbookStates = new Map<string, OrderbookState>()
 
   // --- Trade tracking for P&L ---
-  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string }
+  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; peakBid?: number }
   const openTrades = new Map<string, OpenTrade>()
+  const sellingInProgress = new Set<string>()
+  const buyingInProgress = new Set<string>()
+  const windowCooldowns = new Set<string>()
   let tradeCount = 0
   let winCount = 0
+  let lastTickLog = 0
+  let refreshing = false
 
   // --- Data feeds ---
   const binanceWS = createBinanceWS({
@@ -119,10 +129,10 @@ async function main() {
         momentumStrategy.recordMinutePrice(price, windowKey, Date.now())
       }
     },
-    onConnect() { logger.info('Binance WS connected') },
+    onConnect() { stdout(`${color.green(box.dot)} ${color.green('Binance')} connected`) },
     onDisconnect() {
-      logger.warn('Binance WS disconnected')
-      alerts.sendErrorAlert('Binance WS disconnected — reconnecting')
+      stdout(`${color.red(box.dot)} ${color.yellow('Binance')} disconnected`)
+      setTimeout(() => { if (Date.now() - lastPriceTimestamp > 30_000) alerts.sendErrorAlert('Binance WS down >30s').catch(() => {}) }, 30_000)
     },
     onError(err) { logger.error({ err }, 'Binance WS error') },
   })
@@ -132,10 +142,14 @@ async function main() {
     onUpdate(tokenId, state) {
       orderbookStates.set(tokenId, state)
     },
-    onConnect() { logger.info('Polymarket WS connected') },
+    onConnect() { stdout(`${color.green(box.dot)} ${color.green('Polymarket')} connected`) },
     onDisconnect() {
-      logger.warn('Polymarket WS disconnected')
-      alerts.sendErrorAlert('Polymarket WS disconnected — reconnecting')
+      stdout(`${color.red(box.dot)} ${color.yellow('Polymarket')} disconnected`)
+      setTimeout(() => {
+        if (orderbookStates.size === 0) return // window rotation, WS reconnecting
+        const maxAge = Math.max(...[...orderbookStates.values()].map(s => Date.now() - s.lastUpdate))
+        if (maxAge > 30_000) alerts.sendErrorAlert('Polymarket WS down >30s').catch(() => {})
+      }, 30_000)
     },
     onError(err) { logger.error({ err }, 'Polymarket WS error') },
   })
@@ -145,41 +159,49 @@ async function main() {
   polymarketWS.connect()
 
   // Wait for Binance price
-  logger.info('Waiting for initial price data...')
+  stdout(`${color.dim('...')} Waiting for price data`)
   await Bun.sleep(3000)
 
   // --- Fetch initial market ---
+  let lastFailedRefresh = 0
   await refreshMarket()
-
   async function refreshMarket() {
+    if (refreshing) return
+    if (Date.now() - lastFailedRefresh < 10_000) return // backoff 10s after failed fetch
     const newEpoch = getWindowEpoch(Date.now())
     if (newEpoch === currentEpoch && currentMarket) return
 
-    const market = await fetchCurrentMarket()
-    if (!market) {
-      logger.error('Failed to fetch market from Gamma API')
-      return
+    refreshing = true
+    try {
+      const market = await fetchCurrentMarket()
+      if (!market) {
+        logger.error('Failed to fetch market from Gamma API')
+        lastFailedRefresh = Date.now()
+        return
+      }
+
+      // Re-subscribe Polymarket WS early so orderbook populates while we fetch open price
+      const newIds = [market.yesTokenId, market.noTokenId]
+      polymarketWS.resubscribe(newIds)
+
+      const openPrice = await fetchOpenPrice(market.epoch)
+      if (!openPrice) {
+        stdout(`${tag.warn} Open price unavailable — skipping window`)
+        lastFailedRefresh = Date.now()
+        return // don't update currentMarket/currentEpoch so we retry next tick
+      }
+
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + openPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow('15s')}`)
+      await Bun.sleep(15_000)
+
+      // Commit state AFTER sleep so tick loop won't trade during wait
+      currentMarket = market
+      currentEpoch = newEpoch
+      referencePrice = openPrice
+      stdout(`${color.dim('─'.repeat(50))}`)
+    } finally {
+      refreshing = false
     }
-
-    currentMarket = market
-    currentEpoch = newEpoch
-
-    // Chainlink on-chain feed as real-time ref price, fallback to Binance
-    const chainlinkPrice = await readChainlinkBtcPrice()
-    referencePrice = chainlinkPrice ?? lastPrice ?? 0
-
-    // Re-subscribe Polymarket WS to new token IDs
-    const newIds = [market.yesTokenId, market.noTokenId]
-    polymarketWS.resubscribe(newIds)
-
-    logger.info({
-      epoch: market.epoch,
-      slug: market.slug,
-      yesToken: market.yesTokenId.substring(0, 12) + '...',
-      noToken: market.noTokenId.substring(0, 12) + '...',
-      refPrice: referencePrice,
-      refSource: chainlinkPrice ? 'chainlink' : 'binance',
-    }, 'Market refreshed')
   }
 
   // --- Main loop (1s tick) ---
@@ -205,43 +227,67 @@ async function main() {
       // --- Window rotation: check if we've entered a new 5-min window ---
       const newEpoch = getWindowEpoch(now)
       if (newEpoch !== currentEpoch) {
-        // Resolve any open trades from previous window using priceToBeat for accuracy
+        // Resolve any open trades from previous window — attempt real sell first
         if (currentMarket) {
           const prevKey = `btc-5m-${currentMarket.epoch}`
           const trade = openTrades.get(prevKey)
           if (trade) {
-            // Fetch exact priceToBeat for the ended window (Gamma publishes it after close)
-            const ptb = await fetchPriceToBeat(currentMarket.epoch)
-            const settleRef = ptb ?? trade.refPrice
-            if (ptb) {
-              logger.info({ chainlinkRef: trade.refPrice, priceToBeat: ptb, delta: (ptb - trade.refPrice).toFixed(2) }, 'Using Gamma priceToBeat for settlement')
-            }
-
-            const btcWentUp = currentPrice >= settleRef
-            const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
+            const tokenId = trade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
             const shares = trade.sizeUsdc / trade.entryPrice
-            const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
 
-            riskManager.recordTrade('btc-5m', pnl)
-            riskManager.closePosition('btc-5m')
-            if (weWon) winCount++
+            // Try real sell before falling back to paper settlement
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
 
-            logger.info({
-              side: trade.side,
-              entry: trade.entryPrice,
-              won: weWon,
-              pnl: pnl.toFixed(2),
-              refPrice: settleRef,
-              endPrice: currentPrice,
-            }, weWon ? 'Trade WON' : 'Trade LOST')
+            if (sellResult.success) {
+              const exitBook = orderbookStates.get(tokenId)
+              const exitBid = exitBook?.bestBid ?? 0
+              const revenue = shares * Math.max(exitBid, 0.01) * 0.98
+              const pnl = revenue - trade.sizeUsdc
+
+              riskManager.recordTrade(MARKET_ID, pnl)
+              riskManager.closePosition(MARKET_ID)
+              if (pnl > 0) winCount++
+
+              const holdSec = Math.round((Date.now() - trade.entryTime) / 1000)
+              stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')}`)
+              logger.info({ side: trade.side, entry: trade.entryPrice, pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
+              alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice: exitBid, pnl, reason: 'window expiry', holdSec }).catch(() => {})
+            } else {
+              // Fall back to paper settlement
+              const btcWentUp = currentPrice >= trade.refPrice
+              const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
+              const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
+
+              riskManager.recordTrade(MARKET_ID, pnl)
+              riskManager.closePosition(MARKET_ID)
+              if (weWon) winCount++
+
+              stdout(weWon
+                ? `${tag.win} ${color.bold(trade.side)} settled ${fmtPnl(pnl)}`
+                : `${tag.loss} ${color.bold(trade.side)} settled ${fmtPnl(pnl)}`)
+
+              logger.info({
+                side: trade.side,
+                entry: trade.entryPrice,
+                won: weWon,
+                pnl: pnl.toFixed(2),
+                refPrice: trade.refPrice,
+                endPrice: currentPrice,
+              }, weWon ? 'Trade WON' : 'Trade LOST')
+              alerts.sendErrorAlert(`Window-expiry sell failed — paper settled ${trade.side} @ ${(trade.entryPrice * 100).toFixed(0)}¢`).catch(() => {})
+            }
 
             openTrades.delete(prevKey)
           }
         }
 
-        // Capture reference price for new window
-        referencePrice = currentPrice
-        await refreshMarket()
+        windowCooldowns.clear()
+        sellingInProgress.clear()
+        buyingInProgress.clear()
+        orderbookStates.clear()
+        lastTickLog = 0
+        if (!refreshing) await refreshMarket()
+        return // skip rest of tick — wait for refresh to commit new state
       }
 
       if (!currentMarket || !referencePrice) return
@@ -277,26 +323,18 @@ async function main() {
       const timeRemaining = Math.max(WINDOW_SEC - elapsed, 1)
       const T = timeRemaining / (365.25 * 24 * 3600)
 
-      // --- Ensemble: run 3 models, use consensus ---
-      const fvClassic = classicFairValue(currentPrice, referencePrice, T, sigma)
-      const fvFat7 = fatTailsFairValue(currentPrice, referencePrice, T, sigma, 7)
-      const fvFat4 = fatTailsFairValue(currentPrice, referencePrice, T, sigma, 4)
-
-      // Consensus: use min of the 3 for the favored side (conservative)
-      const allUp = [fvClassic.fairValueUp, fvFat7.fairValueUp, fvFat4.fairValueUp]
-      const allDown = [fvClassic.fairValueDown, fvFat7.fairValueDown, fvFat4.fairValueDown]
-
-      // Check direction agreement: all 3 must agree which side > 0.5
-      const upVotes = allUp.filter(v => v > 0.5).length
-      const downVotes = allDown.filter(v => v > 0.5).length
-      const consensus = upVotes === 3 ? 'UP' : downVotes === 3 ? 'DOWN' : 'SPLIT'
-
-      // Conservative FV = min of 3 models for the favored side
-      const fv: FairValueResult = {
-        fairValueUp: Math.min(...allUp),
-        fairValueDown: Math.min(...allDown),
-        sigma,
-        model: 'ensemble',
+      // --- Adaptive model selection based on vol regime ---
+      let fv: FairValueResult
+      let modelTag: string
+      if (sigma < config.models.lowVolThreshold) {
+        fv = classicFairValue(currentPrice, referencePrice, T, sigma)
+        modelTag = 'C'
+      } else if (sigma > config.models.highVolThreshold) {
+        fv = fatTailsFairValue(currentPrice, referencePrice, T, sigma, 4)
+        modelTag = 'F4'
+      } else {
+        fv = fatTailsFairValue(currentPrice, referencePrice, T, sigma, config.models.studentTNu)
+        modelTag = `F${config.models.studentTNu}`
       }
 
       // Build strategy context
@@ -314,31 +352,29 @@ async function main() {
         elapsedSec: elapsed,
       }
 
-      logger.debug({
-        btc: currentPrice,
-        ref: referencePrice,
-        classic: fvClassic.fairValueUp.toFixed(3),
-        fat7: fvFat7.fairValueUp.toFixed(3),
-        fat4: fvFat4.fairValueUp.toFixed(3),
-        fvUp: fv.fairValueUp.toFixed(3),
-        consensus,
-        mktYes: yesBook.bestAsk,
-        mktNo: noBook.bestAsk,
-        bidYes: yesBook.bestBid,
-        bidNo: noBook.bestBid,
-        elapsed: elapsed.toFixed(0),
-        sigma: sigma.toFixed(4),
-      }, 'Tick')
+      // Compact tick log every 5s
+      if (now - lastTickLog >= 5_000) {
+        lastTickLog = now
+        const pBar = progressBar(elapsed, WINDOW_SEC, 15)
+        const delta = currentPrice - referencePrice
+        const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
+        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}`)
+      }
 
       // --- Check exits for open positions ---
       const existingTrade = openTrades.get(windowKey)
       if (existingTrade) {
-        const exitBid = existingTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid
+        const exitBid = (existingTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
         const fairValue = existingTrade.side === 'YES' ? fv.fairValueUp : fv.fairValueDown
         const arbCfg = config.strategies.fairValueArb
 
         let shouldExit = false
         let exitReason = ''
+
+        // Update peak bid for trailing stop
+        if (exitBid > (existingTrade.peakBid ?? 0)) {
+          existingTrade.peakBid = exitBid
+        }
 
         // Exit at fair value
         if (arbCfg.exitAtFairValue && exitBid >= fairValue) {
@@ -352,36 +388,88 @@ async function main() {
           exitReason = `+${((exitBid - existingTrade.entryPrice) * 100).toFixed(0)}¢ profit`
         }
 
+        // Trailing stop: exit when bid drops trailingStopCents below peak, after activation
+        if (!shouldExit && arbCfg.trailingStopCents > 0 && existingTrade.peakBid) {
+          const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
+          if (profitFromEntry >= arbCfg.trailingActivationCents && exitBid > 0 && exitBid <= existingTrade.peakBid - arbCfg.trailingStopCents) {
+            shouldExit = true
+            exitReason = `trailing stop: peak ${(existingTrade.peakBid * 100).toFixed(0)}¢, bid ${(exitBid * 100).toFixed(0)}¢ (-${((existingTrade.peakBid - exitBid) * 100).toFixed(0)}¢)`
+          }
+        }
+
+        // Pre-expiry emergency dump: sell last 10s at ANY positive bid
+        if (!shouldExit && elapsed >= WINDOW_SEC - 10 && exitBid > 0) {
+          shouldExit = true
+          exitReason = `emergency dump at ${(exitBid * 100).toFixed(0)}¢ (last 10s)`
+        }
+
         if (shouldExit && exitBid > 0) {
+          if (buyingInProgress.has(windowKey) || sellingInProgress.has(windowKey)) return
+
+          const tokenId = existingTrade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
           const shares = existingTrade.sizeUsdc / existingTrade.entryPrice
-          const revenue = shares * exitBid * 0.98 // 2% fee on exit
-          const pnl = revenue - existingTrade.sizeUsdc
+          sellingInProgress.add(windowKey)
+          try {
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
 
-          riskManager.recordTrade('btc-5m', pnl)
-          riskManager.closePosition('btc-5m')
-          if (pnl > 0) winCount++
+            if (!sellResult.success) {
+              existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
+              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures }, 'Sell order failed — keeping position open')
+              if (existingTrade.sellFailures >= 3) {
+                stdout(`${tag.warn} Sell failed ${color.yellow(existingTrade.sellFailures + 'x')} — giving up`)
+                alerts.sendErrorAlert(`Sell failed ${existingTrade.sellFailures}x\n${existingTrade.side} @ ${(existingTrade.entryPrice * 100).toFixed(0)}¢ · ${existingTrade.strategy}`).catch(() => {})
+                riskManager.recordTrade(MARKET_ID, -existingTrade.sizeUsdc)
+                riskManager.closePosition(MARKET_ID)
+                openTrades.delete(windowKey)
+                windowCooldowns.add(windowKey)
+              }
+              return
+            }
 
-          logger.info({
-            side: existingTrade.side,
-            entry: existingTrade.entryPrice,
-            exit: exitBid,
-            pnl: pnl.toFixed(2),
-            reason: exitReason,
-          }, pnl > 0 ? 'EXIT — profit' : 'EXIT — loss')
+            const revenue = shares * exitBid * 0.98 // 2% fee on exit
+            const pnl = revenue - existingTrade.sizeUsdc
 
-          alerts.sendTradeAlert(
-            `EXIT ${existingTrade.strategy} | ${existingTrade.side} | ${(existingTrade.entryPrice * 100).toFixed(0)}¢→${(exitBid * 100).toFixed(0)}¢ | P&L=$${pnl.toFixed(2)} | ${exitReason}`
-          )
+            riskManager.recordTrade(MARKET_ID, pnl)
+            riskManager.closePosition(MARKET_ID)
+            if (pnl > 0) winCount++
 
-          openTrades.delete(windowKey)
-          tradeCount++
+            const holdSec = Math.round((Date.now() - existingTrade.entryTime) / 1000)
+            stdout(`${tag.sell} ${color.bold(existingTrade.side)} ${(existingTrade.entryPrice * 100).toFixed(0)}¢${color.dim(box.arrow)}${(exitBid * 100).toFixed(0)}¢ ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.dim(exitReason)}`)
+
+            logger.info({
+              side: existingTrade.side,
+              entry: existingTrade.entryPrice,
+              exit: exitBid,
+              pnl: pnl.toFixed(2),
+              reason: exitReason,
+            }, pnl > 0 ? 'EXIT — profit' : 'EXIT — loss')
+
+            alerts.sendExitAlert({
+              strategy: existingTrade.strategy,
+              side: existingTrade.side,
+              entryPrice: existingTrade.entryPrice,
+              exitPrice: exitBid,
+              pnl,
+              reason: exitReason,
+              holdSec,
+            }).catch(() => {})
+
+            openTrades.delete(windowKey)
+            windowCooldowns.add(windowKey)
+            tradeCount++
+          } finally {
+            sellingInProgress.delete(windowKey)
+          }
         }
 
         return // already have a position (or just exited), skip new entries this tick
       }
 
-      // Skip new entries when models disagree on direction
-      if (consensus === 'SPLIT') return
+      // Skip new entries when paused via Telegram
+      if (alerts.isPaused()) return
+
+      // Skip new entries in windows where we already exited
+      if (windowCooldowns.has(windowKey)) return
 
       // Evaluate all strategies
       for (const strategy of strategies) {
@@ -390,59 +478,79 @@ async function main() {
           : strategy.evaluate(ctx)
         if (!signal) continue
 
-        const approved = riskManager.approve(signal, 'btc-5m')
+        const approved = riskManager.approve(signal, MARKET_ID)
         if (!approved) continue
+
+        const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
+        approved.price = Math.round((entryPrice + GTC_SLIPPAGE) * 100) / 100
 
         logger.info({
           strategy: signal.strategy,
           side: signal.side,
           edge: signal.edge.toFixed(4),
-          fv: fv.fairValueUp.toFixed(4),
-          marketPrice: signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice,
+          fv: (signal.side === 'YES' ? fv.fairValueUp : fv.fairValueDown).toFixed(4),
+          marketPrice: entryPrice,
           btcPrice: currentPrice,
+          refPrice: referencePrice,
         }, 'Signal detected — executing')
 
-        // Build MarketConfig-compatible object for executor
         const marketConfig: MarketConfig = {
-          id: 'btc-5m',
+          id: MARKET_ID,
           name: `BTC 5m ${currentMarket.slug}`,
           yesTokenId: currentMarket.yesTokenId,
           noTokenId: currentMarket.noTokenId,
           conditionId: currentMarket.conditionId,
           referencePrice,
           windowDurationSec: WINDOW_SEC,
-          tickSize: currentMarket.tickSize as '0.01',
+          tickSize: currentMarket.tickSize as TickSize,
           negRisk: currentMarket.negRisk,
+          minOrderSize: currentMarket.minOrderSize,
         }
 
-        const result = await executor.execute(approved, marketConfig)
+        // Reserve slot + guard BEFORE async call to prevent duplicate orders and sells
+        openTrades.set(windowKey, {
+          side: signal.side,
+          entryPrice,
+          sizeUsdc: approved.sizeUsdc,
+          refPrice: referencePrice,
+          strategy: signal.strategy,
+          entryTime: Date.now(),
+        })
+        buyingInProgress.add(windowKey)
 
-        if (result.success) {
-          riskManager.openPosition('btc-5m')
-          const entryPrice = signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice
+        try {
+          const result = await executor.execute(approved, marketConfig)
 
-          openTrades.set(windowKey, {
-            side: signal.side,
-            entryPrice,
-            sizeUsdc: approved.sizeUsdc,
-            refPrice: referencePrice,
-            strategy: signal.strategy,
-          })
-          tradeCount++
+          if (result.success) {
+            riskManager.openPosition(MARKET_ID)
+            tradeCount++
 
-          alerts.sendTradeAlert(
-            `${signal.strategy} | ${signal.side} | entry=${(entryPrice * 100).toFixed(0)}¢ | edge=${(signal.edge * 100).toFixed(1)}¢ | BTC=$${currentPrice.toFixed(0)}`
-          )
-        } else {
-          logger.warn({ result }, 'Order failed')
-          alerts.sendErrorAlert(`Order failed: ${result.error ?? result.status}`)
+            stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(entryPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))}`)
+
+            alerts.sendEntryAlert({
+              strategy: signal.strategy,
+              side: signal.side,
+              entryPrice,
+              edge: signal.edge,
+              btcPrice: currentPrice,
+            }).catch(() => {})
+          } else {
+            // Order failed — release slot and cooldown this window
+            openTrades.delete(windowKey)
+            windowCooldowns.add(windowKey)
+            stdout(`${color.bgRed(' FAIL ')} ${color.red(String(result.error ?? result.status))}`)
+            logger.warn({ result }, 'Order failed')
+            alerts.sendErrorAlert(`Order failed: ${result.error ?? result.status}\n${signal.side} @ ${(entryPrice * 100).toFixed(0)}¢ · ${signal.strategy}`).catch(() => {})
+          }
+        } finally {
+          buyingInProgress.delete(windowKey)
         }
 
         break // one signal per tick
       }
     } catch (err) {
       logger.error({ err }, 'Main loop error')
-      alerts.sendErrorAlert(`Main loop error: ${err instanceof Error ? err.message : String(err)}`)
+      alerts.sendErrorAlert(`Main loop error: ${err instanceof Error ? err.message : String(err)}`).catch(() => {})
     }
   }, 1000)
 
@@ -450,11 +558,16 @@ async function main() {
   const shutdown = async () => {
     logger.info('Shutting down...')
     clearInterval(tickInterval)
+    alerts.stopPolling()
     binanceWS.close()
     polymarketWS.close()
 
     const pnl = riskManager.getDailyPnl()
-    logger.info({ dailyPnl: pnl, trades: tradeCount, wins: winCount }, 'Bot stopped')
+    const winRate = tradeCount > 0 ? ((winCount / tradeCount) * 100).toFixed(0) + '%' : 'n/a'
+    banner([
+      `${color.bold('SESSION COMPLETE')}`,
+      `${color.dim('P&L')} ${fmtPnl(pnl)}  ${color.dim('trades')} ${tradeCount}  ${color.dim('wins')} ${winCount}  ${color.dim('rate')} ${winRate}`,
+    ], 'stop')
 
     await alerts.sendDailySummary(pnl, tradeCount, winCount)
     process.exit(0)
@@ -463,13 +576,26 @@ async function main() {
   process.on('SIGTERM', shutdown)
   process.on('SIGINT', shutdown)
 
-  logger.info('Bot running — press Ctrl+C to stop')
+  stdout(`${color.green(box.dot)} ${color.green('Ready')} ${color.dim('— Ctrl+C to stop')}`)
+  alerts.sendStartAlert(config.mode, config.risk.positionSizeUsdc, config.risk.maxDailyLossUsdc)
+
+  // Telegram command polling
+  alerts.startPolling(
+    () => stdout(`${tag.warn} Bot paused via Telegram`),
+    () => stdout(`${color.green(box.dot)} Bot resumed via Telegram`),
+  )
 }
 
 // --- Helpers ---
 
+function fmtPnl(pnl: number): string {
+  return pnl >= 0 ? color.green(`+$${pnl.toFixed(2)}`) : color.red(`-$${Math.abs(pnl).toFixed(2)}`)
+}
+
 /** Default BTC annualized vol ~60% — used as bootstrap before enough data */
 const DEFAULT_SIGMA = 0.60
+/** BTC annualized vol never below ~30% — prevents EWMA from collapsing on sparse data */
+const MIN_SIGMA = 0.30
 
 function getSigma(
   models: ModelConfig,
@@ -477,20 +603,18 @@ function getSigma(
   ewmaVar: number,
   garchVar: number,
 ): number {
-  const model = models.fiveMin
+  // Prefer GARCH if configured and warm, then EWMA, then rolling, then default
+  const varianceToUse = (models.fiveMin === 'garch' && garchVar > 0) ? garchVar
+    : ewmaVar > 0 ? ewmaVar
+    : 0
 
-  if (model === 'garch' && garchVar > 0) {
-    return Math.sqrt(garchVar) * Math.sqrt(MINUTES_PER_YEAR)
-  }
-
-  if (ewmaVar > 0) {
-    return Math.sqrt(ewmaVar) * Math.sqrt(MINUTES_PER_YEAR)
+  if (varianceToUse > 0) {
+    return Math.max(Math.sqrt(varianceToUse) * Math.sqrt(MINUTES_PER_YEAR), MIN_SIGMA)
   }
 
   const rolling = store.getRollingVol(60)
-  return rolling > 0 ? rolling : DEFAULT_SIGMA
+  return rolling > 0 ? Math.max(rolling, MIN_SIGMA) : DEFAULT_SIGMA
 }
-
 
 main().catch(err => {
   logger.error({ err }, 'Fatal startup error')

@@ -1,4 +1,4 @@
-mode: paper
+mode: live
 logLevel: debug
 
 # markets auto-discovered from Gamma API — no static IDs needed
@@ -10,10 +10,12 @@ models:
   garchBeta: 0.85
   studentTNu: 7
   ewmaLambda: 0.94
+  lowVolThreshold: 0.40
+  highVolThreshold: 0.65
 
 strategies:
   momentum:
-    enabled: false
+    enabled: true
   lowVolRider:
     enabled: true
     activateLastSec: 60
@@ -22,25 +24,27 @@ strategies:
     maxEntryPrice: 0.85
   fairValueArb:
     enabled: true
-    minGap: 0.10
+    minGap: 0.15
     minFairValue: 0.70
+    minEntryPrice: 0.15
     maxEntryPrice: 0.75
     exitAtFairValue: true
     takeProfitCents: 0.10
   value:
-    enabled: false
+    enabled: true
+    minFairValue: 0.30
 
 timeFilter:
   skipDays: []
 
 risk:
-  positionSizeUsdc: 2.50
-  maxDailyLossUsdc: 25
+  positionSizeUsdc: 1.00
+  maxDailyLossUsdc: 5
   maxConcurrentPositions: 2
   maxMomentumEntryPrice: 0.75
   maxRiderEntryPrice: 0.85
 
 telegram:
-  enabled: false
+  enabled: true
   botToken: ""
   chatId: ""

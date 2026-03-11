@@ -12,6 +12,7 @@ const MarketSchema = v.object({
   schedule: v.optional(v.string()),
   tickSize: v.optional(v.picklist(['0.1', '0.01', '0.001', '0.0001']), '0.01'),
   negRisk: v.optional(v.boolean(), false),
+  minOrderSize: v.optional(v.pipe(v.number(), v.minValue(0)), 5),
 })
 
 const ModelConfigSchema = v.object({
@@ -30,6 +31,10 @@ const ModelConfigSchema = v.object({
   studentTNu: v.optional(v.pipe(v.number(), v.minValue(2)), 7),
   /** EWMA lambda */
   ewmaLambda: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.94),
+  /** σ below this → classic model (aggressive) */
+  lowVolThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 0.40),
+  /** σ above this → fat-tails ν=4 (defensive) */
+  highVolThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 0.65),
 })
 
 const MomentumStrategySchema = v.object({
@@ -71,16 +76,24 @@ const FairValueArbSchema = v.object({
   minGap: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.10),
   /** Min fair value confidence to consider */
   minFairValue: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.70),
+  /** Min entry price — skip illiquid cheap tokens */
+  minEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.15),
   /** Max entry price (dynamically raised based on gap size) */
   maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.75),
   /** Exit when bid >= fair value (sell at FV) */
   exitAtFairValue: v.optional(v.boolean(), true),
   /** Exit when bid >= entry + this amount (e.g., 0.10 = 10¢ profit). 0 = disabled */
   takeProfitCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.10),
+  /** Trailing stop: exit when bid drops this far below peak (e.g., 0.03 = 3¢). 0 = disabled */
+  trailingStopCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.05),
+  /** Trailing stop activates after bid is this far above entry (e.g., 0.07 = 7¢) */
+  trailingActivationCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.07),
 })
 
 const ValueStrategySchema = v.object({
   enabled: v.optional(v.boolean(), true),
+  /** Min fair value to consider buying (skip longshots) */
+  minFairValue: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.30),
   /** Buy when market price < FV * (1 - discountThreshold) */
   discountThreshold: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.20),
   /** Sell when market price >= FV * (1 - exitThreshold) */
@@ -146,3 +159,4 @@ export type LowVolRiderConfig = v.InferOutput<typeof LowVolRiderSchema>
 export type FairValueArbConfig = v.InferOutput<typeof FairValueArbSchema>
 export type ValueConfig = v.InferOutput<typeof ValueStrategySchema>
 export type RiskConfig = v.InferOutput<typeof RiskSchema>
+export type TickSize = '0.1' | '0.01' | '0.001' | '0.0001'

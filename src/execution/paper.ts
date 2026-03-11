@@ -1,6 +1,6 @@
 import type { Executor, ExecutionResult } from './executor.ts'
 import type { ApprovedOrder } from '../risk/manager.ts'
-import type { MarketConfig } from '../config/schema.ts'
+import type { MarketConfig, TickSize } from '../config/schema.ts'
 import { logger } from '../monitoring/logger.ts'
 
 export class PaperExecutor implements Executor {
@@ -35,6 +35,11 @@ export class PaperExecutor implements Executor {
       orderId: `paper-${Date.now()}`,
       status: 'simulated',
     }
+  }
+
+  async sell(tokenId: string, shares: number, _tickSize: TickSize): Promise<ExecutionResult> {
+    logger.info({ tokenId, shares, side: 'SELL', mode: 'PAPER' }, 'Paper SELL executed')
+    return { success: true, orderId: `paper-sell-${Date.now()}`, status: 'simulated' }
   }
 
   getTrades() {

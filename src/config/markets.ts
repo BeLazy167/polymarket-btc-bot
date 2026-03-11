@@ -21,8 +21,8 @@ export async function loadConfig(path: string): Promise<Config> {
   raw.polymarket.funderAddress = process.env.POLYMARKET_FUNDER_ADDRESS ?? raw.polymarket.funderAddress ?? ''
 
   if (raw.telegram) {
-    raw.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN ?? raw.telegram.botToken
-    raw.telegram.chatId = process.env.TELEGRAM_CHAT_ID ?? raw.telegram.chatId
+    raw.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN || raw.telegram.botToken
+    raw.telegram.chatId = process.env.TELEGRAM_CHAT_ID || raw.telegram.chatId
   }
 
   const result = v.safeParse(ConfigSchema, raw)

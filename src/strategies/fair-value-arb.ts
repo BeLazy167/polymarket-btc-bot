@@ -43,6 +43,7 @@ export class FairValueArbStrategy implements Strategy {
     marketPrice: number,
   ): Signal | null {
     if (fairValue < this.config.minFairValue) return null
+    if (marketPrice < this.config.minEntryPrice) return null
 
     const gap = fairValue - marketPrice
     if (gap < this.config.minGap) return null
@@ -67,13 +68,12 @@ export class FairValueArbStrategy implements Strategy {
    * ───────┼───────────┼────────────────────────────
    * 10-15¢ │ 75¢       │ Decent edge, stay conservative
    * 15-25¢ │ 85¢       │ Strong edge, can afford higher entry
-   * 25¢+   │ 92¢       │ Massive edge, market is clearly stale
+   * 25¢+   │ 85¢       │ Massive edge, but cap exposure
    */
   private getDynamicMaxEntry(gap: number, fairValue: number): number {
     // Never pay more than fairValue - minGap (always keep minimum edge)
     const fvCap = fairValue - this.config.minGap * 0.5
 
-    if (gap >= 0.25) return Math.min(0.92, fvCap)
     if (gap >= 0.15) return Math.min(0.85, fvCap)
     return Math.min(this.config.maxEntryPrice, fvCap)
   }

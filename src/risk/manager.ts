@@ -8,6 +8,7 @@ export interface ApprovedOrder {
   strategy: string
   confidence: number
   edge: number
+  price: number
 }
 
 export class RiskManager {
@@ -38,6 +39,7 @@ export class RiskManager {
       strategy: signal.strategy,
       confidence: signal.confidence,
       edge: signal.edge,
+      price: 0,
     }
   }
 
