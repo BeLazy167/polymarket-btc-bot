@@ -10,6 +10,7 @@ export interface ExecutionResult {
   status?: string
   error?: string
   filledShares?: number
+  fillPrice?: number
 }
 
 export interface Executor {
@@ -57,7 +58,14 @@ export class LiveExecutor implements Executor {
       if (!ok) {
         return { success: false, status: response.status, error: response.errorMsg || 'FAK order rejected', filledShares: 0 }
       }
-      return { success: true, orderId: response.orderID, status: response.status, filledShares: shares }
+
+      // Check actual balance to get real fill price
+      await Bun.sleep(300)
+      const filledShares = await this.getTokenBalance(tokenId)
+      const fillPrice = filledShares > 0 ? Math.round(amount / filledShares * 100) / 100 : maxPrice
+      logger.info({ filledShares, fillPrice, amount, market: market.name }, 'FAK buy fill details')
+
+      return { success: true, orderId: response.orderID, status: response.status, filledShares, fillPrice }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       logger.error({ err, market: market.name, msg }, 'FAK buy threw')
@@ -91,17 +99,23 @@ export class LiveExecutor implements Executor {
 
       logger.info({ tokenId, realBalance, sellSize, side: 'SELL' }, 'Executing live SELL order')
 
-      const response = await this.client.createAndPostMarketOrder(
-        {
-          tokenID: tokenId,
-          amount: sellSize,
-          side: PolySide.SELL,
-        },
-        { tickSize: tickSize, negRisk },
-        OrderType.FAK,
-      )
+      let response: { orderID?: string; status?: string }
+      try {
+        response = await this.client.createAndPostMarketOrder(
+          { tokenID: tokenId, amount: sellSize, side: PolySide.SELL },
+          { tickSize: tickSize, negRisk },
+          OrderType.FAK,
+        )
+      } catch (fakErr) {
+        // FAK fails on empty book — fall back to GTC limit sell at 1¢
+        logger.warn({ err: fakErr, tokenId }, 'FAK sell failed — falling back to GTC at 1¢')
+        response = await this.client.createAndPostOrder(
+          { tokenID: tokenId, price: 0.01, size: sellSize, side: PolySide.SELL },
+          { tickSize: tickSize, negRisk },
+          OrderType.GTC,
+        )
+      }
 
-      // Wait for settlement before checking remaining balance
       await Bun.sleep(500)
       const remaining = await this.getTokenBalance(tokenId)
       if (remaining > 0.5) {

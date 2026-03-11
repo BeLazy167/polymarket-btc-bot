@@ -406,14 +406,9 @@ async function main() {
 
             if (!sellResult.success) {
               existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
-              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures }, 'Sell order failed — keeping position open')
-              if (existingTrade.sellFailures >= 3) {
-                stdout(`${tag.warn} Sell failed ${color.yellow(existingTrade.sellFailures + 'x')} — giving up`)
-                alerts.sendErrorAlert(`Sell failed ${existingTrade.sellFailures}x\n${existingTrade.side} @ ${(existingTrade.entryPrice * 100).toFixed(0)}¢ · ${existingTrade.strategy}`).catch(() => {})
-                riskManager.recordTrade(MARKET_ID, -existingTrade.sizeUsdc)
-                riskManager.closePosition(MARKET_ID)
-                openTrades.delete(windowKey)
-                windowCooldowns.add(windowKey)
+              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures }, 'Sell order failed — retrying next tick')
+              if (existingTrade.sellFailures % 5 === 0) {
+                alerts.sendErrorAlert(`Sell failed ${existingTrade.sellFailures}x — still retrying\n${existingTrade.side} @ ${(existingTrade.entryPrice * 100).toFixed(0)}¢ · ${existingTrade.strategy}`).catch(() => {})
               }
               return
             }
@@ -515,15 +510,18 @@ async function main() {
           const result = await executor.execute(approved, marketConfig)
 
           if (result.success) {
-            // Update position with actual fill from FAK
             const actualShares = result.filledShares ?? (currentMarket.minOrderSize ?? 5)
+            const actualPrice = result.fillPrice ?? entryPrice
             const trade = openTrades.get(windowKey)
-            if (trade) trade.sizeUsdc = actualShares * entryPrice
+            if (trade) {
+              trade.entryPrice = actualPrice
+              trade.sizeUsdc = actualShares * actualPrice
+            }
 
             riskManager.openPosition(MARKET_ID)
             tradeCount++
 
-            stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(entryPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('│')} ${color.cyan(actualShares.toFixed(1) + ' shares')}`)
+            stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(actualPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('│')} ${color.cyan(actualShares.toFixed(1) + ' shares')} ${color.dim('$' + (actualShares * actualPrice).toFixed(2))}`)
 
             alerts.sendEntryAlert({
               strategy: signal.strategy,
