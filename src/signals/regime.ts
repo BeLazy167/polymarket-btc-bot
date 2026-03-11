@@ -85,7 +85,7 @@ export class SignalCache {
 
   /** Compute spread and update running median for the token */
   getSpread(book: OrderbookLike | undefined, tokenId: string): number {
-    if (!book || book.bestAsk <= 0 || book.bestBid <= 0) return 0
+    if (!book || !Number.isFinite(book.bestAsk) || !Number.isFinite(book.bestBid) || book.bestAsk <= 0 || book.bestBid <= 0) return 0
     const spread = Math.max(0, book.bestAsk - book.bestBid)
 
     // Update running median samples (keep last 30)
