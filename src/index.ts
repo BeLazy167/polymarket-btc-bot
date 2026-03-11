@@ -85,7 +85,7 @@ async function main() {
   const orderbookStates = new Map<string, OrderbookState>()
 
   // --- Trade tracking for P&L ---
-  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; peakBid?: number }
+  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; peakBid?: number; edge: number }
   const openTrades = new Map<string, OpenTrade>()
   const sellingInProgress = new Set<string>()
   const buyingInProgress = new Set<string>()
@@ -379,18 +379,13 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Take profit
-        if (!shouldExit && arbCfg.takeProfitCents > 0 && exitBid >= existingTrade.entryPrice + arbCfg.takeProfitCents) {
-          shouldExit = true
-          exitReason = `+${((exitBid - existingTrade.entryPrice) * 100).toFixed(0)}¢ profit`
-        }
-
-        // Trailing stop: exit when bid drops trailingStopCents below peak, after activation
-        if (!shouldExit && arbCfg.trailingStopCents > 0 && existingTrade.peakBid) {
+        // Edge-relative trailing stop: activation at 40% of edge, stop width at 25% of edge
+        if (!shouldExit && existingTrade.peakBid) {
+          const stopWidth = existingTrade.edge * 0.25
           const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
-          if (profitFromEntry >= arbCfg.trailingActivationCents && exitBid > 0 && exitBid <= existingTrade.peakBid - arbCfg.trailingStopCents) {
+          if (profitFromEntry >= existingTrade.edge * 0.40 && exitBid > 0 && exitBid <= existingTrade.peakBid - stopWidth) {
             shouldExit = true
-            exitReason = `trailing stop: peak ${(existingTrade.peakBid * 100).toFixed(0)}¢, bid ${(exitBid * 100).toFixed(0)}¢ (-${((existingTrade.peakBid - exitBid) * 100).toFixed(0)}¢)`
+            exitReason = `trailing stop: peak ${(existingTrade.peakBid * 100).toFixed(0)}¢, bid ${(exitBid * 100).toFixed(0)}¢ (-${((existingTrade.peakBid - exitBid) * 100).toFixed(0)}¢, width ${(stopWidth * 100).toFixed(1)}¢)`
           }
         }
 
@@ -512,6 +507,7 @@ async function main() {
           refPrice: referencePrice,
           strategy: signal.strategy,
           entryTime: Date.now(),
+          edge: signal.edge,
         })
         buyingInProgress.add(windowKey)
 

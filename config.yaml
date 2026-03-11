@@ -29,7 +29,7 @@ strategies:
     minEntryPrice: 0.15
     maxEntryPrice: 0.75
     exitAtFairValue: true
-    takeProfitCents: 0.10
+    takeProfitCents: 0
   value:
     enabled: true
     minFairValue: 0.30
@@ -39,7 +39,7 @@ timeFilter:
 
 risk:
   positionSizeUsdc: 5.00
-  maxDailyLossUsdc: 25
+  maxDailyLossUsdc: 10
   maxConcurrentPositions: 2
   maxMomentumEntryPrice: 0.75
   maxRiderEntryPrice: 0.85

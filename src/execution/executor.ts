@@ -39,44 +39,43 @@ export class LiveExecutor implements Executor {
   async execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult> {
     const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
     const shares = market.minOrderSize ?? 5
-    const amount = Math.round(order.price * shares * 100) / 100
+    const price = Math.round((order.price + 0.01) * 100) / 100
 
     logger.info({
       strategy: order.strategy,
       side: order.side,
-      amount,
+      price,
       shares,
       edge: order.edge,
       market: market.name,
     }, 'Executing live order')
 
     try {
-      const balanceBefore = await this.getTokenBalance(tokenId)
-
-      const response = await this.client.createAndPostMarketOrder(
+      const response = await this.client.createAndPostOrder(
         {
           tokenID: tokenId,
-          amount,
+          price,
+          size: shares,
           side: PolySide.BUY,
         },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
-        OrderType.FAK,
+        OrderType.GTC,
       )
 
-      // FAK can partially fill — measure actual shares received
-      const balanceAfter = await this.getTokenBalance(tokenId)
-      const filledShares = balanceAfter - balanceBefore
+      const matched = response.status === 'matched' || response.status === 'filled'
+      logger.info({ orderID: response.orderID, status: response.status, matched, market: market.name }, 'Order response')
 
-      if (filledShares < 1) {
-        logger.warn({ filledShares, amount, market: market.name }, 'FAK fill < 1 share — skipping')
-        return { success: false, status: 'partial-too-small', filledShares: 0 }
+      // Cancel if not matched — don't leave orphaned GTC orders on book
+      if (!matched && response.orderID) {
+        await this.client.cancelOrder({ orderID: response.orderID }).catch(() => {})
+        return { success: false, status: response.status ?? 'unmatched', filledShares: 0 }
       }
 
       const result: ExecutionResult = {
         success: true,
         orderId: response.orderID,
         status: response.status,
-        filledShares,
+        filledShares: shares,
       }
 
       logger.info({ result, market: market.name }, 'Order result')
@@ -123,7 +122,8 @@ export class LiveExecutor implements Executor {
         OrderType.FAK,
       )
 
-      // Check remaining balance after FAK sell
+      // Wait for settlement before checking remaining balance
+      await Bun.sleep(500)
       const remaining = await this.getTokenBalance(tokenId)
       if (remaining > 0.5) {
         logger.warn({ tokenId, remaining, sold: sellSize - remaining }, 'Partial sell — shares remain')
