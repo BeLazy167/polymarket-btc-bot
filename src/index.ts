@@ -413,7 +413,9 @@ async function main() {
               return
             }
 
-            const revenue = shares * exitBid * 0.98 // 2% fee on exit
+            const soldShares = sellResult.filledShares ?? shares
+            const exitPrice = soldShares > 0 ? (soldShares * exitBid * 0.98) / soldShares : exitBid
+            const revenue = soldShares * exitBid * 0.98 // 2% fee on exit
             const pnl = revenue - existingTrade.sizeUsdc
 
             riskManager.recordTrade(MARKET_ID, pnl)
@@ -421,12 +423,13 @@ async function main() {
             if (pnl > 0) winCount++
 
             const holdSec = Math.round((Date.now() - existingTrade.entryTime) / 1000)
-            stdout(`${tag.sell} ${color.bold(existingTrade.side)} ${(existingTrade.entryPrice * 100).toFixed(0)}¢${color.dim(box.arrow)}${(exitBid * 100).toFixed(0)}¢ ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.dim(exitReason)}`)
+            stdout(`${tag.sell} ${color.bold(existingTrade.side)} ${(existingTrade.entryPrice * 100).toFixed(0)}¢${color.dim(box.arrow)}${(exitBid * 100).toFixed(0)}¢ ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')} ${color.dim('$' + revenue.toFixed(2))} ${color.dim(exitReason)}`)
 
             logger.info({
               side: existingTrade.side,
               entry: existingTrade.entryPrice,
               exit: exitBid,
+              soldShares,
               pnl: pnl.toFixed(2),
               reason: exitReason,
             }, pnl > 0 ? 'EXIT — profit' : 'EXIT — loss')
