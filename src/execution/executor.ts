@@ -87,8 +87,8 @@ export class LiveExecutor implements Executor {
     try {
       const realBalance = await this.getTokenBalance(tokenId)
       if (realBalance <= 0) {
-        logger.warn({ tokenId, realBalance }, 'No token balance to sell')
-        return { success: false, error: 'no balance' }
+        logger.warn({ tokenId, realBalance }, 'No token balance — already sold')
+        return { success: true, status: 'already-sold' }
       }
 
       const sellSize = Math.floor(realBalance * 100) / 100

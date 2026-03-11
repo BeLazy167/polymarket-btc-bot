@@ -227,7 +227,7 @@ async function main() {
         // Resolve any open trades from previous window — attempt real sell first
         if (currentMarket) {
           const prevKey = `btc-5m-${currentMarket.epoch}`
-          const trade = openTrades.get(prevKey)
+          const trade = !sellingInProgress.has(prevKey) ? openTrades.get(prevKey) : undefined
           if (trade) {
             const tokenId = trade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
             const shares = trade.sizeUsdc / trade.entryPrice
@@ -278,9 +278,9 @@ async function main() {
           }
         }
 
-        windowCooldowns.clear()
         sellingInProgress.clear()
         buyingInProgress.clear()
+        windowCooldowns.clear()
         orderbookStates.clear()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
@@ -508,7 +508,7 @@ async function main() {
         openTrades.set(windowKey, {
           side: signal.side,
           entryPrice,
-          sizeUsdc: approved.sizeUsdc,
+          sizeUsdc: entryPrice * (currentMarket.minOrderSize ?? 5),
           refPrice: referencePrice,
           strategy: signal.strategy,
           entryTime: Date.now(),

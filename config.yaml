@@ -38,8 +38,8 @@ timeFilter:
   skipDays: []
 
 risk:
-  positionSizeUsdc: 1.00
-  maxDailyLossUsdc: 5
+  positionSizeUsdc: 5.00
+  maxDailyLossUsdc: 25
   maxConcurrentPositions: 2
   maxMomentumEntryPrice: 0.75
   maxRiderEntryPrice: 0.85
