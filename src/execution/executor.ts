@@ -51,11 +51,17 @@ export class LiveExecutor implements Executor {
         OrderType.FAK,
       )
 
-      logger.info({ orderID: response.orderID, status: response.status, market: market.name }, 'FAK buy response')
+      const ok = response.success !== false && !response.errorMsg
+      logger.info({ orderID: response.orderID, status: response.status, errorMsg: response.errorMsg, ok, market: market.name }, 'FAK buy response')
+
+      if (!ok) {
+        return { success: false, status: response.status, error: response.errorMsg || 'FAK order rejected', filledShares: 0 }
+      }
       return { success: true, orderId: response.orderID, status: response.status, filledShares: shares }
     } catch (err) {
-      logger.error({ err, market: market.name }, 'Order execution threw')
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error({ err, market: market.name, msg }, 'FAK buy threw')
+      return { success: false, error: msg }
     }
   }
 
