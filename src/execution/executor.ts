@@ -47,30 +47,20 @@ export class LiveExecutor implements Executor {
     }, 'Executing live order')
 
     try {
-      // GTC = limit order: needs price + size (shares), not amount (USDC)
-      const price = Math.round(order.price * 100) / 100
-      const minSize = market.minOrderSize ?? 5
-      const size = Math.max(minSize, Math.ceil((order.sizeUsdc / price) * 100) / 100)
-
-      const response = await this.client.createAndPostOrder(
+      const shares = market.minOrderSize ?? 5
+      const amount = Math.round(order.price * shares * 100) / 100
+      const response = await this.client.createAndPostMarketOrder(
         {
           tokenID: tokenId,
-          price,
-          size,
+          amount,
           side: PolySide.BUY,
         },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
-        OrderType.GTC,
+        OrderType.FOK,
       )
 
-      // "matched" = filled immediately; anything else = sitting on the book
-      if (response.orderID && response.status !== 'matched') {
-        const balanceBefore = await this.getTokenBalance(tokenId)
-        return this.waitForFillOrCancel(response.orderID, tokenId, balanceBefore, false, 'GTC buy')
-      }
-
       const result: ExecutionResult = {
-        success: response.status === 'matched',
+        success: response.success ?? false,
         orderId: response.orderID,
         status: response.status,
       }
@@ -81,38 +71,6 @@ export class LiveExecutor implements Executor {
       logger.error({ err, market: market.name }, 'Order execution threw')
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
-  }
-
-  /** Post GTC, wait 2s, check balance delta, cancel if unfilled */
-  private async waitForFillOrCancel(
-    orderId: string,
-    tokenId: string,
-    balanceBefore: number,
-    expectDecrease: boolean,
-    label: string,
-  ): Promise<ExecutionResult> {
-    await Bun.sleep(2000)
-    let balanceAfter: number
-    try {
-      balanceAfter = await this.getTokenBalance(tokenId)
-    } catch (err) {
-      logger.error({ err, orderId }, `Balance check failed during ${label} wait`)
-      try { await this.client.cancelOrder({ orderID: orderId }) } catch {}
-      return { success: false, orderId, status: 'cancel-failed', error: 'balance check failed' }
-    }
-    const delta = expectDecrease ? balanceBefore - balanceAfter : balanceAfter - balanceBefore
-    if (delta > 0) {
-      logger.info({ orderId, delta }, `${label} filled after wait`)
-      return { success: true, orderId, status: 'filled-after-wait' }
-    }
-    try {
-      await this.client.cancelOrder({ orderID: orderId })
-      logger.info({ orderId }, `${label} cancelled after 2s`)
-    } catch (cancelErr) {
-      logger.error({ cancelErr, orderId }, `Failed to cancel ${label} — may be orphaned`)
-      return { success: false, orderId, status: 'cancel-failed', error: 'cancel failed' }
-    }
-    return { success: false, orderId, status: 'cancelled-timeout' }
   }
 
   async getTokenBalance(tokenId: string): Promise<number> {
@@ -141,25 +99,18 @@ export class LiveExecutor implements Executor {
 
       logger.info({ tokenId, realBalance, sellSize, side: 'SELL' }, 'Executing live SELL order')
 
-      // GTC limit sell at low price — same pattern as buy: post, wait 2s, check, cancel
-      const price = 0.01
-      const response = await this.client.createAndPostOrder(
+      const response = await this.client.createAndPostMarketOrder(
         {
           tokenID: tokenId,
-          price,
-          size: sellSize,
+          amount: sellSize,
           side: PolySide.SELL,
         },
         { tickSize: tickSize, negRisk },
-        OrderType.GTC,
+        OrderType.FOK,
       )
 
-      if (response.orderID && response.status !== 'matched') {
-        return this.waitForFillOrCancel(response.orderID, tokenId, realBalance, true, 'GTC sell')
-      }
-
       const result: ExecutionResult = {
-        success: response.status === 'matched',
+        success: response.success ?? false,
         orderId: response.orderID,
         status: response.status,
       }

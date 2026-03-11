@@ -24,9 +24,6 @@ const MINUTES_PER_YEAR = 365.25 * 24 * 60
 const WINDOW_SEC = 300
 const MARKET_ID = 'btc-5m'
 
-/** GTC limit price = market ask + slippage buffer for fill */
-const GTC_SLIPPAGE = 0.03
-
 /** Max age of data before we consider it stale and skip trading */
 const MAX_PRICE_STALE_MS = 5_000
 const MAX_BOOK_STALE_MS = 10_000
@@ -482,7 +479,7 @@ async function main() {
         if (!approved) continue
 
         const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
-        approved.price = Math.round((entryPrice + GTC_SLIPPAGE) * 100) / 100
+        approved.price = entryPrice
 
         logger.info({
           strategy: signal.strategy,
