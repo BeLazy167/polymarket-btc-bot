@@ -39,20 +39,47 @@ export class LiveExecutor implements Executor {
   async execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult> {
     const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
     const shares = market.minOrderSize ?? 5
-    const maxPrice = Math.round((order.price + 0.03) * 100) / 100
-    const amount = Math.round(shares * maxPrice * 100) / 100
+    const price = Math.round((order.price + 0.01) * 100) / 100
 
-    logger.info({ strategy: order.strategy, side: order.side, maxPrice, amount, shares, market: market.name }, 'Executing FAK buy')
+    logger.info({
+      strategy: order.strategy,
+      side: order.side,
+      price,
+      shares,
+      edge: order.edge,
+      market: market.name,
+    }, 'Executing live order')
 
     try {
-      const response = await this.client.createAndPostMarketOrder(
-        { tokenID: tokenId, amount, side: PolySide.BUY, price: maxPrice },
+      const response = await this.client.createAndPostOrder(
+        {
+          tokenID: tokenId,
+          price,
+          size: shares,
+          side: PolySide.BUY,
+        },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
-        OrderType.FAK,
+        OrderType.GTC,
       )
 
-      logger.info({ orderID: response.orderID, status: response.status, market: market.name }, 'FAK buy response')
-      return { success: true, orderId: response.orderID, status: response.status, filledShares: shares }
+      const matched = response.status === 'matched' || response.status === 'filled'
+      logger.info({ orderID: response.orderID, status: response.status, matched, market: market.name }, 'Order response')
+
+      // Cancel if not matched — don't leave orphaned GTC orders on book
+      if (!matched && response.orderID) {
+        await this.client.cancelOrder({ orderID: response.orderID }).catch(() => {})
+        return { success: false, status: response.status ?? 'unmatched', filledShares: 0 }
+      }
+
+      const result: ExecutionResult = {
+        success: true,
+        orderId: response.orderID,
+        status: response.status,
+        filledShares: shares,
+      }
+
+      logger.info({ result, market: market.name }, 'Order result')
+      return result
     } catch (err) {
       logger.error({ err, market: market.name }, 'Order execution threw')
       return { success: false, error: err instanceof Error ? err.message : String(err) }

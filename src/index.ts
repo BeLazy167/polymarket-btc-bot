@@ -85,7 +85,7 @@ async function main() {
   const orderbookStates = new Map<string, OrderbookState>()
 
   // --- Trade tracking for P&L ---
-  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; fvPeak?: number; fvFloor?: number; edge: number }
+  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; peakBid?: number; edge: number }
   const openTrades = new Map<string, OpenTrade>()
   const sellingInProgress = new Set<string>()
   const buyingInProgress = new Set<string>()
@@ -355,17 +355,7 @@ async function main() {
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
         const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
-        const openTrade = openTrades.get(`btc-5m-${currentMarket.epoch}`)
-        let posStr = ''
-        if (openTrade) {
-          const bid = (openTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
-          const shares = openTrade.sizeUsdc / openTrade.entryPrice
-          const unrealized = (bid - openTrade.entryPrice) * shares * 0.98
-          const pnlStr = unrealized >= 0 ? color.green(`+$${unrealized.toFixed(2)}`) : color.red(`-$${Math.abs(unrealized).toFixed(2)}`)
-          const floorStr = openTrade.fvFloor ? ` fl${(openTrade.fvFloor * 100).toFixed(0)}¢` : ''
-          posStr = ` ${color.dim('│')} ${color.bold(openTrade.side)} ${(openTrade.entryPrice * 100).toFixed(0)}¢→${(bid * 100).toFixed(0)}¢ ${pnlStr}${color.dim(floorStr)}`
-        }
-        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}${posStr}`)
+        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}`)
       }
 
       // --- Check exits for open positions ---
@@ -378,15 +368,9 @@ async function main() {
         let shouldExit = false
         let exitReason = ''
 
-        // Track FV peak and ratchet floor
-        const edgeFloor = existingTrade.edge * 0.33
-        const ratchetWidth = arbCfg.fvRatchetWidth ?? 0.15
-        if (!existingTrade.fvFloor) {
-          existingTrade.fvFloor = existingTrade.entryPrice + edgeFloor
-        }
-        if (fairValue > (existingTrade.fvPeak ?? 0)) {
-          existingTrade.fvPeak = fairValue
-          existingTrade.fvFloor = Math.max(existingTrade.fvFloor, fairValue - ratchetWidth)
+        // Update peak bid for trailing stop
+        if (exitBid > (existingTrade.peakBid ?? 0)) {
+          existingTrade.peakBid = exitBid
         }
 
         // Exit at fair value
@@ -395,16 +379,14 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // FV floor exit — thesis breaking
-        if (!shouldExit && fairValue < existingTrade.fvFloor) {
-          shouldExit = true
-          exitReason = `fv floor: fv ${(fairValue * 100).toFixed(0)}¢ < floor ${(existingTrade.fvFloor * 100).toFixed(0)}¢ (peak ${((existingTrade.fvPeak ?? 0) * 100).toFixed(0)}¢)`
-        }
-
-        // Time stop — dead money
-        if (!shouldExit && elapsed >= WINDOW_SEC * 0.6 && fairValue < existingTrade.entryPrice + edgeFloor) {
-          shouldExit = true
-          exitReason = `time stop: ${elapsed.toFixed(0)}s held, fv ${(fairValue * 100).toFixed(0)}¢ near entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+        // Edge-relative trailing stop: activation at 40% of edge, stop width at 25% of edge
+        if (!shouldExit && existingTrade.peakBid) {
+          const stopWidth = existingTrade.edge * 0.25
+          const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
+          if (profitFromEntry >= existingTrade.edge * 0.40 && exitBid > 0 && exitBid <= existingTrade.peakBid - stopWidth) {
+            shouldExit = true
+            exitReason = `trailing stop: peak ${(existingTrade.peakBid * 100).toFixed(0)}¢, bid ${(exitBid * 100).toFixed(0)}¢ (-${((existingTrade.peakBid - exitBid) * 100).toFixed(0)}¢, width ${(stopWidth * 100).toFixed(1)}¢)`
+          }
         }
 
         // Pre-expiry emergency dump: sell last 10s at ANY positive bid
