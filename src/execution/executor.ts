@@ -9,6 +9,7 @@ export interface ExecutionResult {
   orderId?: string
   status?: string
   error?: string
+  filledShares?: number
 }
 
 export interface Executor {
@@ -37,18 +38,21 @@ export class LiveExecutor implements Executor {
 
   async execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult> {
     const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
+    const shares = market.minOrderSize ?? 5
+    const amount = Math.round(order.price * shares * 100) / 100
 
     logger.info({
       strategy: order.strategy,
       side: order.side,
-      size: order.sizeUsdc,
+      amount,
+      shares,
       edge: order.edge,
       market: market.name,
     }, 'Executing live order')
 
     try {
-      const shares = market.minOrderSize ?? 5
-      const amount = Math.round(order.price * shares * 100) / 100
+      const balanceBefore = await this.getTokenBalance(tokenId)
+
       const response = await this.client.createAndPostMarketOrder(
         {
           tokenID: tokenId,
@@ -56,13 +60,23 @@ export class LiveExecutor implements Executor {
           side: PolySide.BUY,
         },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
-        OrderType.FOK,
+        OrderType.FAK,
       )
 
+      // FAK can partially fill — measure actual shares received
+      const balanceAfter = await this.getTokenBalance(tokenId)
+      const filledShares = balanceAfter - balanceBefore
+
+      if (filledShares < 1) {
+        logger.warn({ filledShares, amount, market: market.name }, 'FAK fill < 1 share — skipping')
+        return { success: false, status: 'partial-too-small', filledShares: 0 }
+      }
+
       const result: ExecutionResult = {
-        success: response.success ?? false,
+        success: true,
         orderId: response.orderID,
         status: response.status,
+        filledShares,
       }
 
       logger.info({ result, market: market.name }, 'Order result')
@@ -106,13 +120,20 @@ export class LiveExecutor implements Executor {
           side: PolySide.SELL,
         },
         { tickSize: tickSize, negRisk },
-        OrderType.FOK,
+        OrderType.FAK,
       )
 
+      // Check remaining balance after FAK sell
+      const remaining = await this.getTokenBalance(tokenId)
+      if (remaining > 0.5) {
+        logger.warn({ tokenId, remaining, sold: sellSize - remaining }, 'Partial sell — shares remain')
+      }
+
       const result: ExecutionResult = {
-        success: response.success ?? false,
+        success: true,
         orderId: response.orderID,
         status: response.status,
+        filledShares: sellSize - remaining,
       }
 
       logger.info({ result }, 'Sell order result')

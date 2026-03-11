@@ -519,10 +519,15 @@ async function main() {
           const result = await executor.execute(approved, marketConfig)
 
           if (result.success) {
+            // Update position with actual fill from FAK
+            const actualShares = result.filledShares ?? (currentMarket.minOrderSize ?? 5)
+            const trade = openTrades.get(windowKey)
+            if (trade) trade.sizeUsdc = actualShares * entryPrice
+
             riskManager.openPosition(MARKET_ID)
             tradeCount++
 
-            stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(entryPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))}`)
+            stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(entryPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('│')} ${color.cyan(actualShares.toFixed(1) + ' shares')}`)
 
             alerts.sendEntryAlert({
               strategy: signal.strategy,
