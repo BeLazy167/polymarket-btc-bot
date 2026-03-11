@@ -10,18 +10,26 @@ export class PriceStore {
   private head: number
   private count: number
   private maxSize: number
+  private version: number
 
   constructor(maxSize = 1440) {
     this.maxSize = maxSize
     this.buffer = new Array<PriceEntry | null>(maxSize).fill(null)
     this.head = 0
     this.count = 0
+    this.version = 0
   }
 
   addPrice(price: number, timestamp: number): void {
     this.buffer[this.head] = { price, timestamp }
     this.head = (this.head + 1) % this.maxSize
     if (this.count < this.maxSize) this.count++
+    this.version++
+  }
+
+  /** Monotonic counter incremented on every addPrice call */
+  getVersion(): number {
+    return this.version
   }
 
   getLatest(): PriceEntry | null {

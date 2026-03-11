@@ -12,6 +12,10 @@ models:
   ewmaLambda: 0.94
   lowVolThreshold: 0.40
   highVolThreshold: 0.65
+  jumpRatioThreshold: 0.85
+  jumpCooldownMs: 7000
+  baselineSpread: 0.02
+  spreadMultiplier: 1.0
 
 strategies:
   momentum:

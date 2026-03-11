@@ -35,6 +35,14 @@ const ModelConfigSchema = v.object({
   lowVolThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 0.40),
   /** σ above this → fat-tails ν=4 (defensive) */
   highVolThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 0.65),
+  /** Bipower ratio below this triggers jump cooldown */
+  jumpRatioThreshold: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.85),
+  /** Jump cooldown duration in ms */
+  jumpCooldownMs: v.optional(v.pipe(v.number(), v.minValue(0)), 7000),
+  /** Default spread baseline when no median history */
+  baselineSpread: v.optional(v.pipe(v.number(), v.minValue(0)), 0.02),
+  /** Spread penalty multiplier for edge adjustment */
+  spreadMultiplier: v.optional(v.pipe(v.number(), v.minValue(0)), 1.0),
 })
 
 const MomentumStrategySchema = v.object({

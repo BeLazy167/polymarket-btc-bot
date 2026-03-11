@@ -182,3 +182,44 @@ export function garchVariance(
 ): number {
   return omega + alpha * prevReturn * prevReturn + beta * prevVariance
 }
+
+/**
+ * Excess kurtosis of a return series. Normal distribution → 0.
+ * Positive = fat tails, negative = thin tails.
+ */
+export function excessKurtosis(returns: number[]): number {
+  const n = returns.length
+  if (n < 4) return 0
+  const mean = returns.reduce((s, r) => s + r, 0) / n
+  let m2 = 0
+  let m4 = 0
+  for (const r of returns) {
+    const d = r - mean
+    const d2 = d * d
+    m2 += d2
+    m4 += d2 * d2
+  }
+  m2 /= n
+  m4 /= n
+  if (m2 === 0) return 0
+  return (m4 / (m2 * m2)) - 3
+}
+
+/**
+ * Bipower variation ratio: BV / RV.
+ * Near 1.0 = pure diffusion (no jumps). Below ~0.85 = jump detected.
+ * Uses μ₁² = π/2 scaling constant.
+ */
+export function bipowerRatio(returns: number[]): number {
+  const n = returns.length
+  if (n < 3) return 1.0
+  let rv = 0
+  let bv = 0
+  for (let i = 0; i < n; i++) {
+    rv += returns[i]! * returns[i]!
+    if (i > 0) bv += Math.abs(returns[i]!) * Math.abs(returns[i - 1]!)
+  }
+  if (rv === 0) return 1.0
+  bv *= Math.PI / 2
+  return bv / rv
+}

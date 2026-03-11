@@ -7,6 +7,7 @@ import { fetchCurrentMarket, fetchOpenPrice, getWindowEpoch, type LiveMarket } f
 import { classicFairValue } from './models/classic.ts'
 import { fatTailsFairValue } from './models/fat-tails.ts'
 import { ewmaVariance, garchVariance } from './models/math.ts'
+import { SignalCache, clamp } from './signals/regime.ts'
 import type { FairValueResult, StrategyContext, Signal } from './models/types.ts'
 import { MomentumStrategy } from './strategies/momentum.ts'
 import { LowVolRiderStrategy } from './strategies/low-vol-rider.ts'
@@ -64,6 +65,13 @@ async function main() {
   if (config.strategies.value.enabled) strategies.push(new ValueStrategy(config.strategies.value))
 
   stdout(`${color.dim(box.arrow)} Strategies: ${color.bold(strategies.map(s => s.name).join(color.dim(' │ ')))}`)
+
+  // --- Signal cache for regime detection ---
+  const signalCache = new SignalCache({
+    jumpRatioThreshold: config.models.jumpRatioThreshold,
+    jumpCooldownMs: config.models.jumpCooldownMs,
+    baselineSpread: config.models.baselineSpread,
+  })
 
   // --- Vol state (updated once per minute, not per tick) ---
   let ewmaVar = 0
@@ -282,6 +290,7 @@ async function main() {
         buyingInProgress.clear()
         windowCooldowns.clear()
         orderbookStates.clear()
+        signalCache.resetSpreadMedians()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
         return // skip rest of tick — wait for refresh to commit new state
@@ -320,13 +329,22 @@ async function main() {
       const timeRemaining = Math.max(WINDOW_SEC - elapsed, 1)
       const T = timeRemaining / (365.25 * 24 * 3600)
 
+      // --- Regime signals ---
+      signalCache.updateOnReturn(priceStore, now)
+      const returnSignals = signalCache.getReturnSignals()
+
+      // Kurtosis-shifted model thresholds
+      const kurtShift = clamp(returnSignals.kurtosis / 20, -0.10, 0.10)
+      const effectiveLowVol = config.models.lowVolThreshold - kurtShift
+      const effectiveHighVol = config.models.highVolThreshold - kurtShift
+
       // --- Adaptive model selection based on vol regime ---
       let fv: FairValueResult
       let modelTag: string
-      if (sigma < config.models.lowVolThreshold) {
+      if (sigma < effectiveLowVol) {
         fv = classicFairValue(currentPrice, referencePrice, T, sigma)
         modelTag = 'C'
-      } else if (sigma > config.models.highVolThreshold) {
+      } else if (sigma > effectiveHighVol) {
         fv = fatTailsFairValue(currentPrice, referencePrice, T, sigma, 4)
         modelTag = 'F4'
       } else {
@@ -355,7 +373,12 @@ async function main() {
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
         const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
-        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}`)
+        const noSpread = signalCache.getSpread(noBook, currentMarket.noTokenId)
+        const yesSpread = signalCache.getSpread(yesBook, currentMarket.yesTokenId)
+        const tickSpread = Math.max(noSpread, yesSpread)
+        const spreadCents = (tickSpread * 100).toFixed(0)
+        const jumpTag = signalCache.isJumpCooldown(now) ? color.red('J!') : color.green('ok')
+        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')} ${color.dim('│')} k:${returnSignals.kurtosis.toFixed(1)} j:${returnSignals.jumpRatio.toFixed(2)}${jumpTag} s:${spreadCents}¢`)
       }
 
       // --- Check exits for open positions ---
@@ -468,12 +491,30 @@ async function main() {
       // Skip new entries in windows where we already exited
       if (windowCooldowns.has(windowKey)) return
 
+      // Jump cooldown gate — before strategy loop
+      if (signalCache.isJumpCooldown(now)) {
+        logger.debug({ jumpRatio: returnSignals.jumpRatio }, 'Jump cooldown — skipping entries')
+        return
+      }
+
+      // Spread-adjusted minGap for entry decisions
+      const entryTokenId = currentMarket.noTokenId // most common entry side
+      const entrySpread = signalCache.getSpread(noBook, entryTokenId)
+      const baseline = signalCache.getBaselineSpread(entryTokenId)
+      const spreadPenalty = Math.max(0, entrySpread - baseline) * config.models.spreadMultiplier
+
       // Evaluate all strategies
       for (const strategy of strategies) {
         const signal = strategy instanceof MomentumStrategy
           ? strategy.evaluate(ctx, windowKey)
           : strategy.evaluate(ctx)
         if (!signal) continue
+
+        // Spread penalty: require more edge when spread is wide
+        if (spreadPenalty > 0 && signal.edge < config.strategies.fairValueArb.minGap + spreadPenalty) {
+          logger.debug({ strategy: signal.strategy, edge: signal.edge, spreadPenalty }, 'Spread penalty filtered signal')
+          continue
+        }
 
         const approved = riskManager.approve(signal, MARKET_ID)
         if (!approved) continue
@@ -489,6 +530,7 @@ async function main() {
           marketPrice: entryPrice,
           btcPrice: currentPrice,
           refPrice: referencePrice,
+          regime: { ...returnSignals, spread: entrySpread, spreadPenalty, kurtShift },
         }, 'Signal detected — executing')
 
         const marketConfig: MarketConfig = {
