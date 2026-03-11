@@ -334,7 +334,7 @@ async function main() {
       const returnSignals = signalCache.getReturnSignals()
 
       // Kurtosis-shifted model thresholds
-      const kurtShift = clamp(returnSignals.kurtosis / 20, -0.10, 0.10)
+      const kurtShift = Number.isFinite(returnSignals.kurtosis) ? clamp(returnSignals.kurtosis / 20, -0.10, 0.10) : 0
       const effectiveLowVol = config.models.lowVolThreshold - kurtShift
       const effectiveHighVol = config.models.highVolThreshold - kurtShift
 

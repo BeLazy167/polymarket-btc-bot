@@ -48,9 +48,12 @@ export class SignalCache {
     const returns = store.getReturns(RETURN_WINDOW + 1)
     if (returns.length < 4) return
 
-    this.cached.kurtosis = excessKurtosis(returns)
-    this.cached.jumpRatio = bipowerRatio(returns)
-    this.cached.volOfVol = this.computeVolOfVol(returns)
+    const kurt = excessKurtosis(returns)
+    const jump = bipowerRatio(returns)
+    const vov = this.computeVolOfVol(returns)
+    this.cached.kurtosis = Number.isFinite(kurt) ? kurt : 0
+    this.cached.jumpRatio = Number.isFinite(jump) ? jump : 1.0
+    this.cached.volOfVol = Number.isFinite(vov) ? vov : 0
 
     // Trigger jump cooldown
     if (this.cached.jumpRatio < this.jumpRatioThreshold) {
@@ -83,7 +86,7 @@ export class SignalCache {
   /** Compute spread and update running median for the token */
   getSpread(book: OrderbookLike | undefined, tokenId: string): number {
     if (!book || book.bestAsk <= 0 || book.bestBid <= 0) return 0
-    const spread = book.bestAsk - book.bestBid
+    const spread = Math.max(0, book.bestAsk - book.bestBid)
 
     // Update running median samples (keep last 30)
     let samples = this.spreadMedians.get(tokenId)
