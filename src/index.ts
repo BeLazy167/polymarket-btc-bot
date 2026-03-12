@@ -191,7 +191,7 @@ async function main() {
         return
       }
 
-      const cooldownSec = WINDOW_SEC >= 900 ? 180 : 5
+      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
       stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
       await Bun.sleep(cooldownSec * 1_000)
 
