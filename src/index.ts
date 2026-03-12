@@ -365,10 +365,10 @@ async function main() {
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
         const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
-        // Show PnL + distance to TP if we have an open position in profit
+        // Show PnL + distance to TP if we have a confirmed position (not still buying)
         const openTrade = openTrades.get(windowKey)
         let posStr = ''
-        if (openTrade) {
+        if (openTrade && !buyingInProgress.has(windowKey)) {
           const bid = (openTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
           const unrealizedPnl = (bid - openTrade.entryPrice) * (openTrade.sizeUsdc / openTrade.entryPrice)
           const toTp = (openTrade.entryPrice + 0.10) - bid
