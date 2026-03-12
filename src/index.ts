@@ -190,8 +190,9 @@ async function main() {
         return
       }
 
-      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow('5s')}`)
-      await Bun.sleep(5_000)
+      const cooldownSec = WINDOW_SEC >= 900 ? 180 : 5
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
+      await Bun.sleep(cooldownSec * 1_000)
 
       // Commit state AFTER sleep so tick loop won't trade during wait
       currentMarket = market
@@ -483,9 +484,6 @@ async function main() {
 
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
-
-      // Skip first 3 min of 15m windows — let vol/price stabilize
-      if (WINDOW_SEC >= 900 && elapsed < 180) return
 
       // Skip new entries in windows where we already exited
       if (windowCooldowns.has(windowKey)) return
