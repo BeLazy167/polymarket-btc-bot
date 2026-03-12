@@ -12,6 +12,8 @@ export interface EntryAlertData {
   entryPrice: number
   edge: number
   btcPrice: number
+  signalPrice?: number
+  fillPrice?: number
 }
 
 export interface ExitAlertData {
@@ -157,10 +159,13 @@ export function createAlerts(config: AlertsConfig) {
     startPolling,
     stopPolling,
     async sendEntryAlert(data: EntryAlertData): Promise<void> {
+      const slipLine = data.signalPrice != null && data.fillPrice != null
+        ? `\nFilled ${(data.fillPrice * 100).toFixed(0)}¢ (signal ${(data.signalPrice * 100).toFixed(0)}¢, slip ${((data.fillPrice - data.signalPrice) * 100).toFixed(1)}¢)`
+        : ''
       const msg = [
         `🟢 <b>ENTRY</b>`,
         ``,
-        `<b>${data.side}</b> @ ${(data.entryPrice * 100).toFixed(0)}¢ · edge ${(data.edge * 100).toFixed(1)}¢`,
+        `<b>${data.side}</b> @ ${(data.entryPrice * 100).toFixed(0)}¢ · edge ${(data.edge * 100).toFixed(1)}¢${slipLine}`,
         `<i>${data.strategy}</i> · BTC $${data.btcPrice.toFixed(0)}`,
         ``,
         statsLine(),

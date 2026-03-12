@@ -30,10 +30,6 @@ export interface Executor {
   sell(tokenId: string, shares: number, tickSize: TickSize, negRisk?: boolean): Promise<ExecutionResult>
 }
 
-function calcFillPrice(amount: number, shares: number): number {
-  return Math.round(amount / shares * 100) / 100
-}
-
 export class LiveExecutor implements Executor {
   private client: ClobClient
 
@@ -53,63 +49,92 @@ export class LiveExecutor implements Executor {
     )
   }
 
+  /**
+   * Place GTC limit order at current ask, poll for fill up to 10s, cancel if unfilled.
+   * Sends inline heartbeats to prevent Polymarket from auto-cancelling the resting order.
+   */
   async execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult> {
     const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
     const shares = market.minOrderSize ?? 5
-    const maxPrice = Math.round((order.price + 0.03) * 100) / 100
-    const amount = Math.max(Math.round(shares * maxPrice * 100) / 100, 1)
+    const price = Math.round(Math.min(order.price, 0.97) * 100) / 100
 
-    logger.info({ strategy: order.strategy, side: order.side, maxPrice, amount, shares, market: market.name }, 'Executing FAK buy')
+    logger.info({ strategy: order.strategy, side: order.side, price, marketPrice: order.price, shares, market: market.name }, 'Executing GTC buy')
+
+    // Heartbeat keeps GTC order alive (Polymarket cancels all orders if no heartbeat within 10-15s)
+    let heartbeatId: string | undefined
+    const sendHeartbeat = async () => {
+      try {
+        const resp = await this.client.postHeartbeat(heartbeatId ?? undefined)
+        heartbeatId = resp.heartbeat_id
+      } catch { /* heartbeat failed — order may get cancelled */ }
+    }
+
+    await sendHeartbeat()
 
     try {
-      const resp: OrderApiResponse = await this.client.createAndPostMarketOrder(
-        { tokenID: tokenId, amount, side: PolySide.BUY, price: maxPrice },
+      const resp: OrderApiResponse = await this.client.createAndPostOrder(
+        { tokenID: tokenId, price, size: shares, side: PolySide.BUY },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
-        OrderType.FAK,
+        OrderType.GTC,
       )
 
       const ok = resp.success !== false && !resp.errorMsg
-      logger.info({
-        orderID: resp.orderID, status: resp.status, errorMsg: resp.errorMsg,
-        makingAmount: resp.makingAmount, takingAmount: resp.takingAmount,
-        ok, market: market.name,
-      }, 'FAK buy response')
+      logger.info({ orderID: resp.orderID, status: resp.status, errorMsg: resp.errorMsg, ok, market: market.name }, 'GTC buy response')
 
       if (!ok) {
-        return { success: false, status: resp.status, error: resp.errorMsg || 'FAK order rejected', filledShares: 0 }
+        return { success: false, status: resp.status, error: resp.errorMsg || 'GTC order rejected', filledShares: 0 }
       }
 
-      // Verify fill via getOrder() — more reliable than balance timing
+      // If immediately matched, no need to poll
+      if (resp.status === 'matched' && resp.orderID) {
+        const matched = Number(resp.takingAmount) || shares
+        logger.info({ filledShares: matched, fillPrice: price, market: market.name }, 'GTC buy instant match')
+        return { success: true, orderId: resp.orderID, status: 'matched', filledShares: matched, fillPrice: price }
+      }
+
+      const orderId = resp.orderID
+      if (!orderId) {
+        return { success: false, error: 'No orderID returned', filledShares: 0 }
+      }
+
+      // Poll getOrder() every 2s for up to 10s, heartbeat mid-poll to stay alive
       let filledShares = 0
-      let fillPrice = maxPrice
-      await Bun.sleep(2000)
-
-      if (resp.orderID) {
+      for (let i = 0; i < 5; i++) {
+        await Bun.sleep(2_000)
+        if (i === 2) await sendHeartbeat() // mid-poll heartbeat at ~6s
         try {
-          const order = await this.client.getOrder(resp.orderID)
-          const matched = Number(order.size_matched) || 0
-          logger.info({ orderId: resp.orderID, sizeMatched: matched, originalSize: order.original_size, orderStatus: order.status }, 'FAK buy order query')
-          if (matched > 0) {
-            filledShares = matched
-            fillPrice = calcFillPrice(amount, matched)
+          const o = await this.client.getOrder(orderId)
+          const matched = Number(o.size_matched) || 0
+          logger.debug({ orderId, poll: i + 1, matched, status: o.status }, 'GTC buy poll')
+
+          if (matched >= shares || o.status === 'matched') {
+            filledShares = matched > 0 ? matched : shares
+            break
           }
-        } catch { /* getOrder() failed — fall through to balance */ }
+          if (matched > 0) filledShares = matched
+        } catch { /* poll failed — retry next iteration */ }
       }
 
-      // Fall back to balance check if getOrder() returned 0
+      // Cancel unfilled remainder
+      if (filledShares < shares) {
+        try { await this.client.cancelOrder({ orderID: orderId }) } catch { /* already filled or cancelled */ }
+      }
+
       if (filledShares === 0) {
         const balance = await this.getTokenBalance(tokenId)
-        if (balance > 0) {
-          filledShares = balance
-          fillPrice = calcFillPrice(amount, balance)
-        }
+        if (balance > 0) filledShares = balance
       }
 
-      logger.info({ filledShares, fillPrice, amount, market: market.name }, 'FAK buy fill details')
-      return { success: true, orderId: resp.orderID, status: resp.status, filledShares, fillPrice }
+      const slippage = filledShares > 0 ? price - order.price : 0
+      logger.info({ filledShares, fillPrice: price, signalPrice: order.price, slippage: slippage.toFixed(2), market: market.name }, 'GTC buy fill details')
+
+      if (filledShares === 0) {
+        return { success: false, orderId, status: 'no-fill', error: 'GTC matched 0 shares after 10s', filledShares: 0 }
+      }
+      return { success: true, orderId, status: 'filled', filledShares, fillPrice: price }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logger.error({ err, market: market.name, msg }, 'FAK buy threw')
+      logger.error({ err, market: market.name, msg }, 'GTC buy threw')
       return { success: false, error: msg }
     }
   }

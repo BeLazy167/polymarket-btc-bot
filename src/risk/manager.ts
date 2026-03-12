@@ -9,6 +9,7 @@ export interface ApprovedOrder {
   confidence: number
   edge: number
   price: number
+  sigma: number
 }
 
 export class RiskManager {
@@ -40,6 +41,7 @@ export class RiskManager {
       confidence: signal.confidence,
       edge: signal.edge,
       price: 0,
+      sigma: 0,
     }
   }
 

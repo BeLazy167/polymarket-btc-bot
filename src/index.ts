@@ -388,10 +388,10 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Fixed take-profit at 15¢
-        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.15) {
+        // Fixed take-profit at 10¢
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10) {
           shouldExit = true
-          exitReason = `TP 15¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+          exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
         // Edge-relative trailing stop: activation at 40% of edge, stop width at 60% of edge
@@ -499,6 +499,7 @@ async function main() {
 
         const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
         approved.price = entryPrice
+        approved.sigma = sigma
 
         logger.info({
           strategy: signal.strategy,
@@ -555,9 +556,11 @@ async function main() {
             alerts.sendEntryAlert({
               strategy: signal.strategy,
               side: signal.side,
-              entryPrice,
+              entryPrice: actualPrice,
               edge: signal.edge,
               btcPrice: currentPrice,
+              signalPrice: entryPrice,
+              fillPrice: actualPrice,
             }).catch(() => {})
           } else {
             // Order failed — release slot and cooldown this window
