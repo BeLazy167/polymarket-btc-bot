@@ -11,9 +11,7 @@ const CONFIG_PATH = process.argv[2] ?? 'config.yaml'
 
 // Known epochs from recent trades
 const MARKETS_TO_CHECK = [
-  { epoch: 1773207900, windowSec: 900, label: '15m' },   // 5.4 NO shares
-  { epoch: 1773204900, windowSec: 300, label: '5m' },    // 5.02 NO (phantom)
-  { epoch: 1773205200, windowSec: 300, label: '5m' },    // 5.02 YES (phantom)
+  { epoch: 1773287100, windowSec: 900, label: '15m' },   // 4.9656 NO shares stuck
 ]
 
 async function main() {

@@ -90,7 +90,8 @@ async function main() {
   const openTrades = new Map<string, OpenTrade>()
   const sellingInProgress = new Set<string>()
   const buyingInProgress = new Set<string>()
-  const windowCooldowns = new Set<string>()
+  const MAX_TRADES_PER_WINDOW = 2
+  const windowTradeCount = new Map<string, number>()
   let tradeCount = 0
   let winCount = 0
   let lastTickLog = 0
@@ -190,8 +191,9 @@ async function main() {
         return
       }
 
-      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow('5s')}`)
-      await Bun.sleep(5_000)
+      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
+      await Bun.sleep(cooldownSec * 1_000)
 
       // Commit state AFTER sleep so tick loop won't trade during wait
       currentMarket = market
@@ -235,9 +237,11 @@ async function main() {
             try {
             const tokenId = trade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
             const shares = trade.sizeUsdc / trade.entryPrice
+            const expiryBook = orderbookStates.get(tokenId)
+            const expiryBid = expiryBook?.bestBid
 
             // Try real sell before falling back to paper settlement
-            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, expiryBid)
 
             if (sellResult.success) {
               const exitBook = orderbookStates.get(tokenId)
@@ -255,11 +259,23 @@ async function main() {
               stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')}`)
               logger.info({ side: trade.side, entry: trade.entryPrice, exitPrice, soldShares, revenue: revenue.toFixed(2), pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
               alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice, pnl, reason: 'window expiry', holdSec, soldShares, revenue }).catch(() => {})
-            } else {
-              // Fall back to paper settlement
+            } else if (sellResult.remaining !== undefined && sellResult.remaining < 5) {
+              // B3: sub-minimum stuck — don't paper-settle, shares will resolve on-chain
               const btcWentUp = currentPrice >= trade.refPrice
               const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
-              const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
+              const estimatedPnl = weWon ? (sellResult.remaining * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
+
+              riskManager.closePosition(MARKET_ID)
+              // Don't record PnL — shares still in wallet, will resolve at $1 or $0
+              stdout(`${tag.sell} ${color.bold(trade.side)} ${color.yellow('pending resolution')} ${sellResult.remaining?.toFixed(1)} shares stuck (sub-min) — ${weWon ? 'likely win' : 'likely loss'} ~${fmtPnl(estimatedPnl)}`)
+              logger.warn({ side: trade.side, entry: trade.entryPrice, remaining: sellResult.remaining, tokenId, weWon, estimatedPnl: estimatedPnl.toFixed(2) }, 'Pending on-chain resolution — no PnL recorded')
+              alerts.sendErrorAlert(`⏳ ${trade.side} pending resolution — ${sellResult.remaining?.toFixed(1)} shares stuck, ${weWon ? 'likely win' : 'likely loss'}`).catch(() => {})
+            } else {
+              // Fall back to paper settlement (normal sell failure, >= 5 shares)
+              const btcWentUp = currentPrice >= trade.refPrice
+              const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
+              const partialRevenue = sellResult.revenue ?? 0
+              const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : partialRevenue - trade.sizeUsdc
 
               riskManager.recordTrade(MARKET_ID, pnl)
               riskManager.closePosition(MARKET_ID)
@@ -289,7 +305,7 @@ async function main() {
 
         sellingInProgress.clear()
         buyingInProgress.clear()
-        windowCooldowns.clear()
+        windowTradeCount.clear()
         orderbookStates.clear()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
@@ -358,13 +374,26 @@ async function main() {
         elapsedSec: elapsed,
       }
 
-      // Compact tick log every 5s
-      if (now - lastTickLog >= 5_000) {
+      // Compact tick log every 1s
+      if (now - lastTickLog >= 1_000) {
         lastTickLog = now
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
         const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
-        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}`)
+        // Show PnL + distance to TP if we have a confirmed position (not still buying)
+        const openTrade = openTrades.get(windowKey)
+        let posStr = ''
+        if (openTrade && !buyingInProgress.has(windowKey)) {
+          const bid = (openTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
+          const unrealizedPnl = (bid - openTrade.entryPrice) * (openTrade.sizeUsdc / openTrade.entryPrice)
+          const toTp = (openTrade.entryPrice + 0.10) - bid
+          if (unrealizedPnl > 0) {
+            posStr = ` ${color.green('PnL +$' + unrealizedPnl.toFixed(2))} ${color.dim('TP in')} ${color.yellow((toTp * 100).toFixed(0) + '¢')}`
+          } else {
+            posStr = ` ${color.red('PnL -$' + Math.abs(unrealizedPnl).toFixed(2))}`
+          }
+        }
+        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}${posStr}`)
       }
 
       // --- Check exits for open positions ---
@@ -377,8 +406,8 @@ async function main() {
         let shouldExit = false
         let exitReason = ''
 
-        // Update peak bid for trailing stop
-        if (exitBid > (existingTrade.peakBid ?? 0)) {
+        // Update peak bid for trailing stop (only after buy is confirmed)
+        if (!buyingInProgress.has(windowKey) && exitBid > (existingTrade.peakBid ?? 0)) {
           existingTrade.peakBid = exitBid
         }
 
@@ -388,14 +417,20 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Fixed take-profit at 15¢
-        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.15) {
+        // Fixed take-profit at 10¢
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10) {
           shouldExit = true
-          exitReason = `TP 15¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+          exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
-        // Edge-relative trailing stop: activation at 40% of edge, stop width at 60% of edge
-        if (!shouldExit && existingTrade.peakBid) {
+        // Low-vol-rider: fixed 10¢ stop loss (no trailing stop — high conviction, hold to expiry)
+        if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider') && exitBid <= existingTrade.entryPrice - 0.10) {
+          shouldExit = true
+          exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢ (-10¢)`
+        }
+
+        // Edge-relative trailing stop (not for low-vol-rider)
+        if (!shouldExit && existingTrade.peakBid && !existingTrade.strategy.startsWith('low-vol-rider')) {
           const stopWidth = existingTrade.edge * 0.60
           const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
           if (profitFromEntry >= existingTrade.edge * 0.40 && exitBid > 0 && exitBid <= existingTrade.peakBid - stopWidth) {
@@ -417,7 +452,7 @@ async function main() {
           const shares = existingTrade.sizeUsdc / existingTrade.entryPrice
           sellingInProgress.add(windowKey)
           try {
-            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, exitBid)
 
             if (!sellResult.success) {
               existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
@@ -471,7 +506,7 @@ async function main() {
             }).catch(() => {})
 
             openTrades.delete(windowKey)
-            windowCooldowns.add(windowKey)
+            windowTradeCount.set(windowKey, (windowTradeCount.get(windowKey) ?? 0) + 1)
             tradeCount++
           } finally {
             sellingInProgress.delete(windowKey)
@@ -484,8 +519,8 @@ async function main() {
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
 
-      // Skip new entries in windows where we already exited
-      if (windowCooldowns.has(windowKey)) return
+      // Skip new entries if max trades per window reached
+      if ((windowTradeCount.get(windowKey) ?? 0) >= MAX_TRADES_PER_WINDOW) return
 
       // Evaluate all strategies
       for (const strategy of strategies) {
@@ -499,6 +534,7 @@ async function main() {
 
         const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
         approved.price = entryPrice
+        approved.sigma = sigma
 
         logger.info({
           strategy: signal.strategy,
@@ -555,14 +591,15 @@ async function main() {
             alerts.sendEntryAlert({
               strategy: signal.strategy,
               side: signal.side,
-              entryPrice,
+              entryPrice: actualPrice,
               edge: signal.edge,
               btcPrice: currentPrice,
+              signalPrice: entryPrice,
+              fillPrice: actualPrice,
             }).catch(() => {})
           } else {
-            // Order failed — release slot and cooldown this window
+            // Order failed — release slot, allow retry next tick
             openTrades.delete(windowKey)
-            windowCooldowns.add(windowKey)
             stdout(`${color.bgRed(' FAIL ')} ${color.red(String(result.error ?? result.status))}`)
             logger.warn({ result }, 'Order failed')
             alerts.sendErrorAlert(`Order failed: ${result.error ?? result.status}\n${signal.side} @ ${(entryPrice * 100).toFixed(0)}¢ · ${signal.strategy}`).catch(() => {})
