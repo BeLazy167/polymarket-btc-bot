@@ -158,9 +158,9 @@ export class LiveExecutor implements Executor {
       }
 
       const sellSize = Math.floor(realBalance * 100) / 100
-      if (sellSize <= 0) {
-        logger.warn({ tokenId, realBalance }, 'Dust balance too small to sell')
-        return { success: true, status: 'dust-skip', remaining: 0 }
+      if (sellSize < 5) {
+        logger.warn({ tokenId, realBalance, sellSize }, 'Balance below min order size (5) — treating as dust, will settle on-chain')
+        return { success: true, status: 'dust-skip', remaining: realBalance }
       }
 
       logger.info({ tokenId, realBalance, sellSize, side: 'SELL' }, 'Executing sell')
@@ -196,7 +196,7 @@ export class LiveExecutor implements Executor {
         try { await this.client.cancelAll() } catch { /* no stale orders */ }
 
         const gtcSize = Math.floor(remaining * 100) / 100
-        if (gtcSize > 0) {
+        if (gtcSize >= 5) {
           logger.warn({ tokenId, remaining, gtcSize }, 'FAK did not clear — placing GTC sell at 1¢')
           try {
             const gtcResp: OrderApiResponse = await this.client.createAndPostOrder(
