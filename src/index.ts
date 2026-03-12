@@ -90,7 +90,8 @@ async function main() {
   const openTrades = new Map<string, OpenTrade>()
   const sellingInProgress = new Set<string>()
   const buyingInProgress = new Set<string>()
-  const windowCooldowns = new Set<string>()
+  const MAX_TRADES_PER_WINDOW = 2
+  const windowTradeCount = new Map<string, number>()
   let tradeCount = 0
   let winCount = 0
   let lastTickLog = 0
@@ -290,7 +291,7 @@ async function main() {
 
         sellingInProgress.clear()
         buyingInProgress.clear()
-        windowCooldowns.clear()
+        windowTradeCount.clear()
         orderbookStates.clear()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
@@ -485,7 +486,7 @@ async function main() {
             }).catch(() => {})
 
             openTrades.delete(windowKey)
-            windowCooldowns.add(windowKey)
+            windowTradeCount.set(windowKey, (windowTradeCount.get(windowKey) ?? 0) + 1)
             tradeCount++
           } finally {
             sellingInProgress.delete(windowKey)
@@ -498,8 +499,8 @@ async function main() {
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
 
-      // Skip new entries in windows where we already exited
-      if (windowCooldowns.has(windowKey)) return
+      // Skip new entries if max trades per window reached
+      if ((windowTradeCount.get(windowKey) ?? 0) >= MAX_TRADES_PER_WINDOW) return
 
       // Evaluate all strategies
       for (const strategy of strategies) {
