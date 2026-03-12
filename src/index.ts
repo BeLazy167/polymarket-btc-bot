@@ -359,8 +359,8 @@ async function main() {
         elapsedSec: elapsed,
       }
 
-      // Compact tick log every 5s
-      if (now - lastTickLog >= 5_000) {
+      // Compact tick log every 1s
+      if (now - lastTickLog >= 1_000) {
         lastTickLog = now
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
