@@ -365,7 +365,20 @@ async function main() {
         const pBar = progressBar(elapsed, WINDOW_SEC, 15)
         const delta = currentPrice - referencePrice
         const deltaStr = delta >= 0 ? color.green(`+${delta.toFixed(0)}`) : color.red(`${delta.toFixed(0)}`)
-        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}`)
+        // Show PnL + distance to TP if we have an open position in profit
+        const openTrade = openTrades.get(windowKey)
+        let posStr = ''
+        if (openTrade) {
+          const bid = (openTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
+          const unrealizedPnl = (bid - openTrade.entryPrice) * (openTrade.sizeUsdc / openTrade.entryPrice)
+          const toTp = (openTrade.entryPrice + 0.10) - bid
+          if (unrealizedPnl > 0) {
+            posStr = ` ${color.green('PnL +$' + unrealizedPnl.toFixed(2))} ${color.dim('TP in')} ${color.yellow((toTp * 100).toFixed(0) + '¢')}`
+          } else {
+            posStr = ` ${color.red('PnL -$' + Math.abs(unrealizedPnl).toFixed(2))}`
+          }
+        }
+        stdout(`${pBar} ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('ref')}$${referencePrice.toFixed(0)} ${color.dim('Δ')}${deltaStr} ${color.dim('│')} ${color.green('Y')} fv=${color.cyan(fv.fairValueUp.toFixed(2))} a=${yesBook.bestAsk.toFixed(2)} b=${(yesBook.bestBid ?? 0).toFixed(2)} ${color.dim('│')} ${color.red('N')} fv=${color.cyan(fv.fairValueDown.toFixed(2))} a=${noBook.bestAsk.toFixed(2)} b=${(noBook.bestBid ?? 0).toFixed(2)} ${color.dim('σ')}=${sigma.toFixed(2)} ${color.magenta('[' + modelTag + ']')}${posStr}`)
       }
 
       // --- Check exits for open positions ---
