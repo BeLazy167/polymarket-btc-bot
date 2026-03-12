@@ -225,7 +225,12 @@ export class LiveExecutor implements Executor {
 
       // Final truth: balance determines success
       if (remaining > 0.5 && remaining < 5) {
-        // Sub-minimum remaining can't be sold — treat as dust, will settle on-chain
+        if (sold <= 0) {
+          // Nothing sold — full position stuck, not dust. Return failure so caller retries.
+          logger.warn({ tokenId, remaining, realBalance }, 'Sub-minimum unsold — FAK no match, will retry')
+          return { success: false, orderId: lastOrderId, status: 'no-fill', remaining, error: `Sub-min ${remaining.toFixed(2)} shares — FAK no match` }
+        }
+        // Partial sell, sub-minimum remaining can't be sold — treat as dust
         logger.warn({ tokenId, remaining, sold, totalUsdcReceived }, 'Sub-minimum remaining — dust, will settle on-chain')
         return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined }
       }
