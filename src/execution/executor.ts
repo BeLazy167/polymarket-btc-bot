@@ -158,9 +158,9 @@ export class LiveExecutor implements Executor {
       }
 
       const sellSize = Math.floor(realBalance * 100) / 100
-      if (sellSize < 5) {
-        logger.warn({ tokenId, realBalance, sellSize }, 'Balance below min order size (5) — treating as dust, will settle on-chain')
-        return { success: true, status: 'dust-skip', remaining: realBalance }
+      if (sellSize <= 0) {
+        logger.warn({ tokenId, realBalance }, 'Dust balance too small to sell')
+        return { success: true, status: 'dust-skip', remaining: 0 }
       }
 
       logger.info({ tokenId, realBalance, sellSize, side: 'SELL' }, 'Executing sell')
@@ -224,6 +224,11 @@ export class LiveExecutor implements Executor {
         : undefined
 
       // Final truth: balance determines success
+      if (remaining > 0.5 && remaining < 5) {
+        // Sub-minimum remaining can't be sold — treat as dust, will settle on-chain
+        logger.warn({ tokenId, remaining, sold, totalUsdcReceived }, 'Sub-minimum remaining — dust, will settle on-chain')
+        return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined }
+      }
       if (remaining > 0.5) {
         logger.warn({ tokenId, remaining, sold, realBalance, totalUsdcReceived }, 'Sell incomplete — shares still in wallet')
         return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined, error: `${remaining.toFixed(2)} shares remain` }
