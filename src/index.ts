@@ -406,8 +406,8 @@ async function main() {
         let shouldExit = false
         let exitReason = ''
 
-        // Update peak bid for trailing stop
-        if (exitBid > (existingTrade.peakBid ?? 0)) {
+        // Update peak bid for trailing stop (only after buy is confirmed)
+        if (!buyingInProgress.has(windowKey) && exitBid > (existingTrade.peakBid ?? 0)) {
           existingTrade.peakBid = exitBid
         }
 
@@ -423,8 +423,14 @@ async function main() {
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
-        // Edge-relative trailing stop: activation at 40% of edge, stop width at 60% of edge
-        if (!shouldExit && existingTrade.peakBid) {
+        // Low-vol-rider: fixed 10¢ stop loss (no trailing stop — high conviction, hold to expiry)
+        if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider') && exitBid <= existingTrade.entryPrice - 0.10) {
+          shouldExit = true
+          exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢ (-10¢)`
+        }
+
+        // Edge-relative trailing stop (not for low-vol-rider)
+        if (!shouldExit && existingTrade.peakBid && !existingTrade.strategy.startsWith('low-vol-rider')) {
           const stopWidth = existingTrade.edge * 0.60
           const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
           if (profitFromEntry >= existingTrade.edge * 0.40 && exitBid > 0 && exitBid <= existingTrade.peakBid - stopWidth) {
