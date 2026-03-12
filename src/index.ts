@@ -484,6 +484,9 @@ async function main() {
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
 
+      // Skip first 3 min of 15m windows — let vol/price stabilize
+      if (WINDOW_SEC >= 900 && elapsed < 180) return
+
       // Skip new entries in windows where we already exited
       if (windowCooldowns.has(windowKey)) return
 
