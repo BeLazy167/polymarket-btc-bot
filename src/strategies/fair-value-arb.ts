@@ -25,6 +25,10 @@ export class FairValueArbStrategy implements Strategy {
   constructor(private config: FairValueArbConfig) {}
 
   evaluate(ctx: StrategyContext): Signal | null {
+    // Gamma bomb protection: no FV-arb entries in last 120s — FV estimates are unreliable
+    const timeRemaining = ctx.windowDurationSec - ctx.elapsedSec
+    if (timeRemaining < 120) return null
+
     // Check YES side: is market underpricing the UP outcome?
     const yesSignal = this.checkSide(ctx, 'YES', ctx.fairValueUp, ctx.marketYesPrice)
     if (yesSignal) return yesSignal
@@ -46,7 +50,8 @@ export class FairValueArbStrategy implements Strategy {
     if (marketPrice < this.config.minEntryPrice) return null
 
     const gap = fairValue - marketPrice
-    if (gap < this.config.minGap) return null
+    const minGap = this.getTimeAdjustedMinGap(ctx)
+    if (gap < minGap) return null
 
     // Dynamic max entry: bigger gap = we accept higher prices
     // because the edge is so large that even expensive entries are +EV
@@ -59,6 +64,16 @@ export class FairValueArbStrategy implements Strategy {
       edge: gap,
       strategy: `${this.name}-gap${(gap * 100).toFixed(0)}¢`,
     }
+  }
+
+  /** Require wider gap as expiry approaches — gamma makes FV less reliable. */
+  private getTimeAdjustedMinGap(ctx: StrategyContext): number {
+    const frac = (ctx.windowDurationSec - ctx.elapsedSec) / ctx.windowDurationSec
+    // Last 33% of window: ramp minGap from 10¢ → 20¢
+    if (frac < 0.33) {
+      return this.config.minGap + 0.10 * (1 - frac / 0.33)
+    }
+    return this.config.minGap
   }
 
   /**

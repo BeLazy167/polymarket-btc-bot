@@ -335,14 +335,14 @@ async function main() {
       const elapsed = (now - currentMarket.windowStartMs) / 1000
       if (elapsed < 0 || elapsed > WINDOW_SEC) return
 
+      const timeRemaining = Math.max(WINDOW_SEC - elapsed, 1)
+
       // Get volatility + fair value
-      const sigma = getSigma(config.models, priceStore, ewmaVar, garchVar, WINDOW_SEC)
+      const sigma = getSigma(config.models, priceStore, ewmaVar, garchVar, WINDOW_SEC, timeRemaining)
       if (!Number.isFinite(sigma) || sigma <= 0) {
         logger.debug({ sigma }, 'No valid vol estimate yet')
         return
       }
-
-      const timeRemaining = Math.max(WINDOW_SEC - elapsed, 1)
       const T = timeRemaining / (365.25 * 24 * 3600)
 
       // --- Adaptive model selection based on vol regime ---
@@ -539,11 +539,14 @@ async function main() {
         logger.info({
           strategy: signal.strategy,
           side: signal.side,
-          edge: signal.edge.toFixed(4),
-          fv: (signal.side === 'YES' ? fv.fairValueUp : fv.fairValueDown).toFixed(4),
+          edge: signal.edge,
+          fv: signal.side === 'YES' ? fv.fairValueUp : fv.fairValueDown,
           marketPrice: entryPrice,
           btcPrice: currentPrice,
           refPrice: referencePrice,
+          sigma,
+          timeRemaining,
+          modelTag,
         }, 'Signal detected — executing')
 
         const marketConfig: MarketConfig = {
@@ -665,19 +668,32 @@ function getSigma(
   ewmaVar: number,
   garchVar: number,
   windowSec: number,
+  timeRemainingSec?: number,
 ): number {
+  // Adaptive sigma floor: ramps from MIN_SIGMA to 0.50 in last 15% of window (gamma bomb protection)
+  let floor = MIN_SIGMA
+  if (timeRemainingSec != null && windowSec > 0) {
+    const elapsedFrac = 1 - (timeRemainingSec / windowSec)
+    if (elapsedFrac > 0.85) {
+      floor = MIN_SIGMA + 0.20 * ((elapsedFrac - 0.85) / 0.15)
+    }
+  }
+
   // Prefer GARCH if configured and warm, then EWMA, then rolling, then default
   const bucket = getTimeframeBucket(windowSec)
   const varianceToUse = (models[bucket] === 'garch' && garchVar > 0) ? garchVar
     : ewmaVar > 0 ? ewmaVar
     : 0
 
+  // Use max(EWMA/GARCH, 15min RV) — RV holds memory of recent large moves even if EWMA collapses
+  const rvSigma = store.getRollingVol(15)
+
   if (varianceToUse > 0) {
-    return Math.max(Math.sqrt(varianceToUse) * Math.sqrt(MINUTES_PER_YEAR), MIN_SIGMA)
+    const ewmaSigma = Math.sqrt(varianceToUse) * Math.sqrt(MINUTES_PER_YEAR)
+    return Math.max(ewmaSigma, rvSigma, floor)
   }
 
-  const rolling = store.getRollingVol(60)
-  return rolling > 0 ? Math.max(rolling, MIN_SIGMA) : DEFAULT_SIGMA
+  return rvSigma > 0 ? Math.max(rvSigma, floor) : DEFAULT_SIGMA
 }
 
 main().catch(err => {

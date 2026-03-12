@@ -1,13 +1,28 @@
 # Strategy Improvements Roadmap
 
-## Current State
+## Current State (updated 2026-03-11)
 - 3 fair value models: Classic (lognormal+EWMA), GARCH, Fat Tails (Student-t)
 - 4 strategies: momentum, low-vol-rider, fair-value-arb, value
 - Single vol input (EWMA or GARCH, one at a time)
 - Price-only signals (no order flow)
-- Fixed position sizing
+- Fixed position sizing ($5/trade)
 - Dynamic market discovery from Gamma API
-- Exit logic: sell at fair value or +10¢ take-profit
+- Configurable window duration (5m and 15m supported)
+- Exit logic: sell at fair value or take-profit target
+- Execution: FAK with GTC fallback at 1¢ for sells
+- 5s cooldown after window refresh, window cooldown on exit/fail
+
+### Live Performance (bot.log — 87 paper exits, ~6hr session)
+- **93% win rate**, profit factor 6.67, net +$31.79
+- Profit targets: 76/76 wins, +$35.04 (the moneymaker)
+- FV exits: 5W/6L, -$3.25 (the drag — 3 big losses from selling into empty books)
+- Best entry range: <50¢ avg +$0.72/trade; 70¢+ only +$0.19/trade
+- Max drawdown: $2.86, max win streak: 35
+
+### Known Bugs (as of 2026-03-11)
+- ~~Concurrent window-rotation sells double-counting losses~~ FIXED (sellingInProgress guard)
+- Paper settle PnL ignores partial fills — if sell returns `success: false` with `filledShares > 0`, paper settlement records full loss
+- No persistent position tracking — crash during open position = lost data
 
 ---
 
@@ -201,9 +216,36 @@ Prerequisite for items 10-14. Extend bot from single BTC 5-min to scanning all a
 
 ---
 
+## Immediate Fixes (from 2026-03-11 analysis)
+**Priority: CRITICAL | Effort: LOW**
+
+### A. FV Exit Minimum Price Floor
+FV exits lost -$3.25 across 11 trades. Worst: 67¢→6¢ (-$2.28) — sell into empty book. Add `minExitPrice` config (e.g., 0.15) so FV exits won't dump below a floor. This alone would have saved ~$4 in the session.
+
+### B. Paper Settle Partial Fill Accounting
+When `executor.sell()` returns `success: false` with `filledShares > 0` and `revenue > 0`, the paper settlement fallback ignores those and records full loss (`-sizeUsdc`). Should subtract already-realized revenue.
+- File: `src/index.ts` lines 256-279
+
+### C. Tick Re-entrancy Guard
+The 1s `setInterval(async)` tick loop has no global re-entrancy guard. We patched the sell path, but other async operations (buy, refresh) could overlap. Add `if (tickRunning) return` at top.
+
+### D. Persistent Trade Log
+No trade history survives restart. Append each entry/exit to a JSONL file for audit and analysis.
+
+### E. Tighten maxEntryPrice
+Entries <50¢ avg +$0.72/trade, 70¢+ only +$0.19. Consider lowering `maxFairValueArbEntryPrice` from 0.75 to 0.65.
+
+---
+
 ## Implementation Order (suggested)
 
-**Phase 1 — Current BTC 5-min improvements:**
+**Phase 0 — Immediate fixes (do first):**
+A. FV exit min price floor
+B. Paper settle partial fill fix
+C. Tick re-entrancy guard
+D. Persistent trade log
+
+**Phase 1 — Current BTC improvements:**
 1. Ensemble consensus (run all 3 models, require 2/3 agreement)
 2. Time-weighted edge threshold
 3. Binance order flow (already have aggTrade stream)
