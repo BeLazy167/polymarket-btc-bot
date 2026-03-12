@@ -27,7 +27,7 @@ export interface ExecutionResult {
 
 export interface Executor {
   execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult>
-  sell(tokenId: string, shares: number, tickSize: TickSize, negRisk?: boolean): Promise<ExecutionResult>
+  sell(tokenId: string, shares: number, tickSize: TickSize, negRisk?: boolean, bestBid?: number): Promise<ExecutionResult>
 }
 
 export class LiveExecutor implements Executor {
@@ -55,7 +55,7 @@ export class LiveExecutor implements Executor {
    */
   async execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult> {
     const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
-    const shares = market.minOrderSize ?? 5
+    const shares = (market.minOrderSize ?? 5) + 1  // +1 to cover fee deduction, ensures post-fee balance > minOrderSize
     const price = Math.round(Math.min(order.price, 0.97) * 100) / 100
 
     logger.info({ strategy: order.strategy, side: order.side, price, marketPrice: order.price, shares, market: market.name }, 'Executing GTC buy')
@@ -149,7 +149,7 @@ export class LiveExecutor implements Executor {
     return rawBalance / 1e6
   }
 
-  async sell(tokenId: string, _estimatedShares: number, tickSize: TickSize, negRisk?: boolean): Promise<ExecutionResult> {
+  async sell(tokenId: string, _estimatedShares: number, tickSize: TickSize, negRisk?: boolean, bestBid?: number): Promise<ExecutionResult> {
     try {
       const realBalance = await this.getTokenBalance(tokenId)
       if (realBalance <= 0) {
@@ -163,11 +163,12 @@ export class LiveExecutor implements Executor {
         return { success: true, status: 'dust-skip', remaining: 0 }
       }
 
-      logger.info({ tokenId, realBalance, sellSize, side: 'SELL' }, 'Executing sell')
+      logger.info({ tokenId, realBalance, sellSize, bestBid, side: 'SELL' }, 'Executing sell')
 
       // --- Attempt 1: FAK ---
       let lastOrderId: string | undefined
       let totalUsdcReceived = 0
+      let fakSoldShares = 0  // B1: trust FAK response, not just balance diff
       try {
         const resp: OrderApiResponse = await this.client.createAndPostMarketOrder(
           { tokenID: tokenId, amount: sellSize, side: PolySide.SELL },
@@ -177,10 +178,12 @@ export class LiveExecutor implements Executor {
         lastOrderId = resp.orderID
         const ok = resp.success !== false && !resp.errorMsg
         const taking = Number(resp.takingAmount) || 0
+        const making = Number(resp.makingAmount) || 0
         if (taking > 0) totalUsdcReceived += taking
+        if (ok && making > 0) fakSoldShares = making  // B1: shares FAK claims it sold
         logger.info({
           orderID: resp.orderID, status: resp.status, errorMsg: resp.errorMsg,
-          makingAmount: resp.makingAmount, takingAmount: resp.takingAmount, ok,
+          makingAmount: resp.makingAmount, takingAmount: resp.takingAmount, ok, fakSoldShares,
         }, 'FAK sell response')
       } catch (fakErr) {
         logger.warn({ err: fakErr, tokenId }, 'FAK sell threw')
@@ -190,17 +193,25 @@ export class LiveExecutor implements Executor {
       await Bun.sleep(2000)
       let remaining = await this.getTokenBalance(tokenId)
 
-      // --- Attempt 2: GTC at 1¢ if FAK didn't clear ---
+      // B1: if FAK said it sold shares but balance hasn't updated, wait longer
+      if (fakSoldShares > 0 && remaining >= realBalance - 0.01) {
+        logger.info({ fakSoldShares, remaining, realBalance }, 'FAK matched but balance stale — waiting 3s more')
+        await Bun.sleep(3000)
+        remaining = await this.getTokenBalance(tokenId)
+      }
+
+      // --- Attempt 2: GTC at best bid if FAK didn't clear ---
       if (remaining > 0.5) {
-        // Cancel stale orders from previous attempts before placing new GTC
         try { await this.client.cancelAll() } catch { /* no stale orders */ }
 
         const gtcSize = Math.floor(remaining * 100) / 100
+        // B2: use bestBid for GTC price instead of 1¢ — actually gets filled
+        const gtcPrice = bestBid ? Math.round(Math.max(bestBid - 0.01, 0.01) * 100) / 100 : 0.01
         if (gtcSize >= 5) {
-          logger.warn({ tokenId, remaining, gtcSize }, 'FAK did not clear — placing GTC sell at 1¢')
+          logger.warn({ tokenId, remaining, gtcSize, gtcPrice }, 'FAK did not clear — placing GTC sell')
           try {
             const gtcResp: OrderApiResponse = await this.client.createAndPostOrder(
-              { tokenID: tokenId, price: 0.01, size: gtcSize, side: PolySide.SELL },
+              { tokenID: tokenId, price: gtcPrice, size: gtcSize, side: PolySide.SELL },
               { tickSize: tickSize, negRisk },
               OrderType.GTC,
             )
@@ -208,7 +219,7 @@ export class LiveExecutor implements Executor {
             const ok = gtcResp.success !== false && !gtcResp.errorMsg
             const gtcTaking = Number(gtcResp.takingAmount) || 0
             if (gtcTaking > 0) totalUsdcReceived += gtcTaking
-            logger.info({ orderID: gtcResp.orderID, status: gtcResp.status, errorMsg: gtcResp.errorMsg, takingAmount: gtcResp.takingAmount, ok }, 'GTC sell response')
+            logger.info({ orderID: gtcResp.orderID, status: gtcResp.status, errorMsg: gtcResp.errorMsg, takingAmount: gtcResp.takingAmount, gtcPrice, ok }, 'GTC sell response')
 
             await Bun.sleep(2000)
             remaining = await this.getTokenBalance(tokenId)
@@ -218,19 +229,23 @@ export class LiveExecutor implements Executor {
         }
       }
 
-      const sold = realBalance - remaining
+      // B1: use max of balance diff and FAK-reported sold shares
+      const balanceSold = realBalance - remaining
+      const sold = Math.max(balanceSold, fakSoldShares)
+      if (fakSoldShares > 0 && balanceSold <= 0) {
+        logger.warn({ fakSoldShares, balanceSold, remaining, realBalance }, 'Using FAK response (balance stale)')
+      }
+
       const fillPrice = sold > 0 && totalUsdcReceived > 0
         ? Math.round(totalUsdcReceived / sold * 100) / 100
         : undefined
 
-      // Final truth: balance determines success
+      // Final truth: balance determines success (with FAK trust override)
       if (remaining > 0.5 && remaining < 5) {
         if (sold <= 0) {
-          // Nothing sold — full position stuck, not dust. Return failure so caller retries.
           logger.warn({ tokenId, remaining, realBalance }, 'Sub-minimum unsold — FAK no match, will retry')
           return { success: false, orderId: lastOrderId, status: 'no-fill', remaining, error: `Sub-min ${remaining.toFixed(2)} shares — FAK no match` }
         }
-        // Partial sell, sub-minimum remaining can't be sold — treat as dust
         logger.warn({ tokenId, remaining, sold, totalUsdcReceived }, 'Sub-minimum remaining — dust, will settle on-chain')
         return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined }
       }

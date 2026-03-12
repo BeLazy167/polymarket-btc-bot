@@ -237,9 +237,11 @@ async function main() {
             try {
             const tokenId = trade.side === 'YES' ? currentMarket.yesTokenId : currentMarket.noTokenId
             const shares = trade.sizeUsdc / trade.entryPrice
+            const expiryBook = orderbookStates.get(tokenId)
+            const expiryBid = expiryBook?.bestBid
 
             // Try real sell before falling back to paper settlement
-            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, expiryBid)
 
             if (sellResult.success) {
               const exitBook = orderbookStates.get(tokenId)
@@ -257,11 +259,23 @@ async function main() {
               stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')}`)
               logger.info({ side: trade.side, entry: trade.entryPrice, exitPrice, soldShares, revenue: revenue.toFixed(2), pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
               alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice, pnl, reason: 'window expiry', holdSec, soldShares, revenue }).catch(() => {})
-            } else {
-              // Fall back to paper settlement
+            } else if (sellResult.remaining && sellResult.remaining < 5) {
+              // B3: sub-minimum stuck — don't paper-settle, shares will resolve on-chain
               const btcWentUp = currentPrice >= trade.refPrice
               const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
-              const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
+              const estimatedPnl = weWon ? (sellResult.remaining * 0.98) - trade.sizeUsdc : -trade.sizeUsdc
+
+              riskManager.closePosition(MARKET_ID)
+              // Don't record PnL — shares still in wallet, will resolve at $1 or $0
+              stdout(`${tag.sell} ${color.bold(trade.side)} ${color.yellow('pending resolution')} ${sellResult.remaining?.toFixed(1)} shares stuck (sub-min) — ${weWon ? 'likely win' : 'likely loss'} ~${fmtPnl(estimatedPnl)}`)
+              logger.warn({ side: trade.side, entry: trade.entryPrice, remaining: sellResult.remaining, tokenId, weWon, estimatedPnl: estimatedPnl.toFixed(2) }, 'Pending on-chain resolution — no PnL recorded')
+              alerts.sendErrorAlert(`⏳ ${trade.side} pending resolution — ${sellResult.remaining?.toFixed(1)} shares stuck, ${weWon ? 'likely win' : 'likely loss'}`).catch(() => {})
+            } else {
+              // Fall back to paper settlement (normal sell failure, >= 5 shares)
+              const btcWentUp = currentPrice >= trade.refPrice
+              const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)
+              const partialRevenue = sellResult.revenue ?? 0
+              const pnl = weWon ? (shares * 0.98) - trade.sizeUsdc : partialRevenue - trade.sizeUsdc
 
               riskManager.recordTrade(MARKET_ID, pnl)
               riskManager.closePosition(MARKET_ID)
@@ -432,7 +446,7 @@ async function main() {
           const shares = existingTrade.sizeUsdc / existingTrade.entryPrice
           sellingInProgress.add(windowKey)
           try {
-            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk)
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, exitBid)
 
             if (!sellResult.success) {
               existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
