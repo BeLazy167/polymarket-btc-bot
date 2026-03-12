@@ -160,13 +160,19 @@ describe('sell() — B3: sub-minimum positions', () => {
 
 describe('execute() — Layer A: buy minOrderSize+1', () => {
   test('buys 6 shares when minOrderSize is 5', async () => {
+    let balCalls = 0
     const client = {
       postHeartbeat: mock(() => Promise.resolve({ heartbeat_id: 'hb-1' })),
       createAndPostOrder: mock(() => Promise.resolve({
         success: true, orderID: 'buy-1', status: 'matched',
         takingAmount: '6', makingAmount: '4.74',
       })),
-      getBalanceAllowance: mock(() => Promise.resolve({ balance: '5900000' })),
+      // 1st call = pre-fill baseline (0), subsequent = post-fill (6 shares)
+      getBalanceAllowance: mock(() => {
+        balCalls++
+        const bal = balCalls === 1 ? 0 : 6_000_000
+        return Promise.resolve({ balance: String(bal) })
+      }),
     }
 
     const executor = makeExecutor(client)

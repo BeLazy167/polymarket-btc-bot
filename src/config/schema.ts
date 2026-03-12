@@ -61,13 +61,31 @@ const TimeFilterSchema = v.object({
 const LowVolRiderSchema = v.object({
   enabled: v.optional(v.boolean(), true),
   /** Activate in last N seconds of window */
-  activateLastSec: v.optional(v.pipe(v.number(), v.minValue(1)), 60),
+  activateLastSec: v.optional(v.pipe(v.number(), v.minValue(1)), 30),
   /** Min sigma gap for "reversal impossible" */
-  minSigmaGap: v.optional(v.pipe(v.number(), v.minValue(1)), 3),
+  minSigmaGap: v.optional(v.pipe(v.number(), v.minValue(1)), 4),
   /** Min fair value to enter (e.g., 0.90) */
   minFairValue: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.90),
   /** Max entry price on Polymarket */
-  maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.85),
+  maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.88),
+  /** Min edge (fv - marketPrice) to enter */
+  minEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.03),
+})
+
+const MicrostructureSchema = v.object({
+  enabled: v.optional(v.boolean(), true),
+  /** Imbalance: activate in last N seconds */
+  imbalanceActiveSec: v.optional(v.pipe(v.number(), v.minValue(1)), 120),
+  /** Imbalance: min bid/ask depth ratio to trigger */
+  minDepthRatio: v.optional(v.pipe(v.number(), v.minValue(1)), 3),
+  /** Imbalance: min edge (fv - market) to enter */
+  minImbalanceEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.05),
+  /** Liquidity gap: activate in last N seconds */
+  gapActiveSec: v.optional(v.pipe(v.number(), v.minValue(1)), 45),
+  /** Liquidity gap: min spread to detect MM withdrawal */
+  minSpreadForGap: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.08),
+  /** Liquidity gap: min edge to enter */
+  minGapEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.03),
 })
 
 const FairValueArbSchema = v.object({
@@ -140,6 +158,7 @@ export const ConfigSchema = v.object({
   strategies: v.optional(v.object({
     momentum: v.optional(MomentumStrategySchema, {}),
     lowVolRider: v.optional(LowVolRiderSchema, {}),
+    microstructure: v.optional(MicrostructureSchema, {}),
     fairValueArb: v.optional(FairValueArbSchema, {}),
     value: v.optional(ValueStrategySchema, {}),
   }), {}),
@@ -158,6 +177,7 @@ export type MarketConfig = v.InferOutput<typeof MarketSchema>
 export type ModelConfig = v.InferOutput<typeof ModelConfigSchema>
 export type MomentumConfig = v.InferOutput<typeof MomentumStrategySchema>
 export type LowVolRiderConfig = v.InferOutput<typeof LowVolRiderSchema>
+export type MicrostructureConfig = v.InferOutput<typeof MicrostructureSchema>
 export type FairValueArbConfig = v.InferOutput<typeof FairValueArbSchema>
 export type ValueConfig = v.InferOutput<typeof ValueStrategySchema>
 export type RiskConfig = v.InferOutput<typeof RiskSchema>
