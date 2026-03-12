@@ -577,9 +577,8 @@ async function main() {
               fillPrice: actualPrice,
             }).catch(() => {})
           } else {
-            // Order failed — release slot and cooldown this window
+            // Order failed — release slot, allow retry next tick
             openTrades.delete(windowKey)
-            windowCooldowns.add(windowKey)
             stdout(`${color.bgRed(' FAIL ')} ${color.red(String(result.error ?? result.status))}`)
             logger.warn({ result }, 'Order failed')
             alerts.sendErrorAlert(`Order failed: ${result.error ?? result.status}\n${signal.side} @ ${(entryPrice * 100).toFixed(0)}¢ · ${signal.strategy}`).catch(() => {})
