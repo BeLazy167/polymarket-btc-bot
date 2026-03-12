@@ -159,7 +159,7 @@ export function createAlerts(config: AlertsConfig) {
     startPolling,
     stopPolling,
     async sendEntryAlert(data: EntryAlertData): Promise<void> {
-      const slipLine = data.signalPrice != null && data.fillPrice != null
+      const slipLine = data.signalPrice !== undefined && data.fillPrice !== undefined
         ? `\nFilled ${(data.fillPrice * 100).toFixed(0)}¢ (signal ${(data.signalPrice * 100).toFixed(0)}¢, slip ${((data.fillPrice - data.signalPrice) * 100).toFixed(1)}¢)`
         : ''
       const msg = [

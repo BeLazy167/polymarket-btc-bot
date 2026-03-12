@@ -259,7 +259,7 @@ async function main() {
               stdout(`${tag.sell} ${color.bold(trade.side)} window-expiry sell ${fmtPnl(pnl)} ${color.yellow('held ' + holdSec + 's')} ${color.cyan(soldShares.toFixed(1) + ' shares')}`)
               logger.info({ side: trade.side, entry: trade.entryPrice, exitPrice, soldShares, revenue: revenue.toFixed(2), pnl: pnl.toFixed(2) }, 'EXIT — window expiry sell')
               alerts.sendExitAlert({ strategy: trade.strategy, side: trade.side, entryPrice: trade.entryPrice, exitPrice, pnl, reason: 'window expiry', holdSec, soldShares, revenue }).catch(() => {})
-            } else if (sellResult.remaining && sellResult.remaining < 5) {
+            } else if (sellResult.remaining !== undefined && sellResult.remaining < 5) {
               // B3: sub-minimum stuck — don't paper-settle, shares will resolve on-chain
               const btcWentUp = currentPrice >= trade.refPrice
               const weWon = (trade.side === 'YES' && btcWentUp) || (trade.side === 'NO' && !btcWentUp)

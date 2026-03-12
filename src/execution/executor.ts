@@ -66,17 +66,19 @@ export class LiveExecutor implements Executor {
       try {
         const resp = await this.client.postHeartbeat(heartbeatId ?? undefined)
         heartbeatId = resp.heartbeat_id
-      } catch { /* heartbeat failed — order may get cancelled */ }
+      } catch (err) { logger.warn({ err, heartbeatId, market: market.name }, 'Heartbeat failed — GTC order may be auto-cancelled') }
     }
 
     await sendHeartbeat()
 
+    let trackedOrderId: string | undefined
     try {
       const resp: OrderApiResponse = await this.client.createAndPostOrder(
         { tokenID: tokenId, price, size: shares, side: PolySide.BUY },
         { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
         OrderType.GTC,
       )
+      trackedOrderId = resp.orderID
 
       const ok = resp.success !== false && !resp.errorMsg
       logger.info({ orderID: resp.orderID, status: resp.status, errorMsg: resp.errorMsg, ok, market: market.name }, 'GTC buy response')
@@ -87,8 +89,9 @@ export class LiveExecutor implements Executor {
 
       // If immediately matched, no need to poll
       if (resp.status === 'matched' && resp.orderID) {
-        const matched = Number(resp.takingAmount) || shares
-        logger.info({ filledShares: matched, fillPrice: price, market: market.name }, 'GTC buy instant match')
+        const raw = Number(resp.takingAmount)
+        const matched = Number.isFinite(raw) && raw > 0 ? raw : shares
+        logger.info({ filledShares: matched, fillPrice: price, takingAmount: resp.takingAmount, market: market.name }, 'GTC buy instant match')
         return { success: true, orderId: resp.orderID, status: 'matched', filledShares: matched, fillPrice: price }
       }
 
@@ -99,6 +102,7 @@ export class LiveExecutor implements Executor {
 
       // Poll getOrder() every 2s for up to 10s, heartbeat mid-poll to stay alive
       let filledShares = 0
+      let pollFailures = 0
       for (let i = 0; i < 5; i++) {
         await Bun.sleep(2_000)
         if (i === 2) await sendHeartbeat() // mid-poll heartbeat at ~6s
@@ -107,22 +111,27 @@ export class LiveExecutor implements Executor {
           const matched = Number(o.size_matched) || 0
           logger.debug({ orderId, poll: i + 1, matched, status: o.status }, 'GTC buy poll')
 
-          if (matched >= shares || o.status === 'matched') {
-            filledShares = matched > 0 ? matched : shares
+          if (matched >= shares || (o.status === 'matched' && matched > 0)) {
+            filledShares = matched
             break
           }
           if (matched > 0) filledShares = matched
-        } catch { /* poll failed — retry next iteration */ }
+        } catch (pollErr) {
+          pollFailures++
+          if (pollFailures >= 3) logger.warn({ err: pollErr, orderId, poll: i + 1, pollFailures }, 'getOrder poll failed 3+ times')
+        }
       }
 
-      // Cancel unfilled remainder
-      if (filledShares < shares) {
-        try { await this.client.cancelOrder({ orderID: orderId }) } catch { /* already filled or cancelled */ }
+      // Cancel unfilled remainder (skip if fully filled)
+      if (filledShares > 0 && filledShares < shares) {
+        try { await this.client.cancelOrder({ orderID: orderId }) } catch (cancelErr) { logger.warn({ err: cancelErr, orderId, filledShares, shares }, 'cancelOrder failed — GTC buy may still be live') }
       }
 
       if (filledShares === 0) {
+        // Cancel first, then check balance
+        try { await this.client.cancelOrder({ orderID: orderId }) } catch (cancelErr) { logger.warn({ err: cancelErr, orderId }, 'cancelOrder failed on zero-fill') }
         const balance = await this.getTokenBalance(tokenId)
-        if (balance > 0) filledShares = balance
+        if (Number.isFinite(balance) && balance > 0) filledShares = balance
       }
 
       const slippage = filledShares > 0 ? price - order.price : 0
@@ -134,8 +143,8 @@ export class LiveExecutor implements Executor {
       return { success: true, orderId, status: 'filled', filledShares, fillPrice: price }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logger.error({ err, market: market.name, msg }, 'GTC buy threw')
-      return { success: false, error: msg }
+      logger.error({ err, market: market.name, msg, orderId: trackedOrderId }, 'GTC buy threw')
+      return { success: false, error: msg, orderId: trackedOrderId }
     }
   }
 
@@ -202,11 +211,11 @@ export class LiveExecutor implements Executor {
 
       // --- Attempt 2: GTC at best bid if FAK didn't clear ---
       if (remaining > 0.5) {
-        try { await this.client.cancelAll() } catch { /* no stale orders */ }
+        try { await this.client.cancelAll() } catch (cancelErr) { logger.warn({ err: cancelErr, tokenId }, 'cancelAll failed — stale orders may block GTC sell') }
 
         const gtcSize = Math.floor(remaining * 100) / 100
         // B2: use bestBid for GTC price instead of 1¢ — actually gets filled
-        const gtcPrice = bestBid ? Math.round(Math.max(bestBid - 0.01, 0.01) * 100) / 100 : 0.01
+        const gtcPrice = bestBid && Number.isFinite(bestBid) ? Math.round(Math.max(bestBid - 0.01, 0.01) * 100) / 100 : 0.01
         if (gtcSize >= 5) {
           logger.warn({ tokenId, remaining, gtcSize, gtcPrice }, 'FAK did not clear — placing GTC sell')
           try {
@@ -226,17 +235,19 @@ export class LiveExecutor implements Executor {
           } catch (gtcErr) {
             logger.warn({ err: gtcErr, tokenId }, 'GTC sell also threw')
           }
+        } else if (remaining > 0.5) {
+          logger.info({ tokenId, remaining, gtcSize }, 'GTC sell skipped — sub-minimum size')
         }
       }
 
-      // B1: use max of balance diff and FAK-reported sold shares
+      // B1: use max of balance diff and FAK-reported sold shares, clamped to realBalance
       const balanceSold = realBalance - remaining
-      const sold = Math.max(balanceSold, fakSoldShares)
+      const sold = Math.min(Math.max(balanceSold, fakSoldShares), realBalance)
       if (fakSoldShares > 0 && balanceSold <= 0) {
         logger.warn({ fakSoldShares, balanceSold, remaining, realBalance }, 'Using FAK response (balance stale)')
       }
 
-      const fillPrice = sold > 0 && totalUsdcReceived > 0
+      const fillPrice = sold > 0 && totalUsdcReceived > 0 && Number.isFinite(sold) && Number.isFinite(totalUsdcReceived)
         ? Math.round(totalUsdcReceived / sold * 100) / 100
         : undefined
 
@@ -247,15 +258,15 @@ export class LiveExecutor implements Executor {
           return { success: false, orderId: lastOrderId, status: 'no-fill', remaining, error: `Sub-min ${remaining.toFixed(2)} shares — FAK no match` }
         }
         logger.warn({ tokenId, remaining, sold, totalUsdcReceived }, 'Sub-minimum remaining — dust, will settle on-chain')
-        return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined }
+        return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined }
       }
       if (remaining > 0.5) {
         logger.warn({ tokenId, remaining, sold, realBalance, totalUsdcReceived }, 'Sell incomplete — shares still in wallet')
-        return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined, error: `${remaining.toFixed(2)} shares remain` }
+        return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined, error: `${remaining.toFixed(2)} shares remain` }
       }
 
       logger.info({ sold, remaining, totalUsdcReceived, fillPrice, orderId: lastOrderId }, 'Sell complete')
-      return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived || undefined }
+      return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined }
     } catch (err) {
       logger.error({ err, tokenId }, 'Sell threw')
       return { success: false, error: err instanceof Error ? err.message : String(err) }

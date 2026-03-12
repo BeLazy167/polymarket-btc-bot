@@ -62,7 +62,7 @@ describe('sell() — B1: trust FAK response over balance diff', () => {
       return Promise.resolve({ balance: String(bal * 1e6) })
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     const result = await executor.sell('token-1', 6, '0.01', false, 0.89)
 
     expect(result.success).toBe(true)
@@ -76,7 +76,7 @@ describe('sell() — B1: trust FAK response over balance diff', () => {
       fakThrows: true, // FAK threw error
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     const result = await executor.sell('token-1', 5, '0.01', false, 0.89)
 
     expect(result.success).toBe(false)
@@ -90,7 +90,7 @@ describe('sell() — B2: GTC at bestBid', () => {
     const client = makeMockClient({
       balance: 6.0,
       balanceAfterSell: 6.0, // FAK fails, GTC needed
-      fakResponse: { errorMsg: 'no match' },
+      fakResponse: { success: false, errorMsg: 'no match' },
       gtcResponse: { success: true, orderID: 'gtc-1', status: 'matched', takingAmount: '5.28' },
     })
     // After GTC, balance drops
@@ -101,7 +101,7 @@ describe('sell() — B2: GTC at bestBid', () => {
       return Promise.resolve({ balance: String(bal * 1e6) })
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     await executor.sell('token-1', 6, '0.01', false, 0.89)
 
     // Verify GTC was called with bestBid-1¢ = 0.88, not 0.01
@@ -113,16 +113,15 @@ describe('sell() — B2: GTC at bestBid', () => {
     const client = makeMockClient({
       balance: 6.0,
       balanceAfterSell: 6.0,
-      fakResponse: { errorMsg: 'no match' },
+      fakResponse: { success: false, errorMsg: 'no match' },
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     await executor.sell('token-1', 6, '0.01', false) // no bestBid
 
-    if (client.createAndPostOrder.mock.calls.length > 0) {
-      const gtcCall = client.createAndPostOrder.mock.calls[0]
-      expect(gtcCall[0].price).toBe(0.01)
-    }
+    expect(client.createAndPostOrder.mock.calls.length).toBeGreaterThan(0)
+    const gtcCall = client.createAndPostOrder.mock.calls[0]
+    expect(gtcCall[0].price).toBe(0.01)
   })
 })
 
@@ -131,10 +130,10 @@ describe('sell() — B3: sub-minimum positions', () => {
     const client = makeMockClient({
       balance: 4.96,
       balanceAfterSell: 4.96,
-      fakResponse: { errorMsg: 'no orders found to match' },
+      fakResponse: { success: false, errorMsg: 'no orders found to match' },
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     const result = await executor.sell('token-1', 5, '0.01', false)
 
     expect(result.success).toBe(false)
@@ -149,7 +148,7 @@ describe('sell() — B3: sub-minimum positions', () => {
       fakResponse: { success: true, status: 'matched', makingAmount: '4.5', takingAmount: '4.0' },
     })
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     const result = await executor.sell('token-1', 6, '0.01', false)
 
     expect(result.success).toBe(true)
@@ -170,7 +169,7 @@ describe('execute() — Layer A: buy minOrderSize+1', () => {
       getBalanceAllowance: mock(() => Promise.resolve({ balance: '5900000' })),
     }
 
-    const executor = await makeExecutor(client)
+    const executor = makeExecutor(client)
     await executor.execute(
       { side: 'YES', sizeUsdc: 5, strategy: 'test', confidence: 0.8, edge: 0.1, price: 0.79, sigma: 0.3 },
       { name: 'test', yesTokenId: 'yes-1', noTokenId: 'no-1', tickSize: '0.01', minOrderSize: 5, negRisk: false, slug: '', conditionId: '', epoch: 0 },
