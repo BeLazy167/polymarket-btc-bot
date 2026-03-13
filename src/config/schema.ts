@@ -106,6 +106,8 @@ const FairValueArbSchema = v.object({
   trailingStopCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.05),
   /** Trailing stop activates after bid is this far above entry (e.g., 0.07 = 7¢) */
   trailingActivationCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.07),
+  /** Fixed stop-loss: exit when bid <= entry - this amount (e.g., 0.15 = 15¢). 0 = disabled */
+  stopLossCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.50)), 0.15),
 })
 
 const ValueStrategySchema = v.object({

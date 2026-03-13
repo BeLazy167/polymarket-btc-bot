@@ -453,6 +453,12 @@ async function main() {
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
+        // Fixed stop-loss: exit when bid drops stopLossCents below entry
+        if (!shouldExit && arbCfg.stopLossCents > 0 && exitBid > 0 && exitBid <= existingTrade.entryPrice - arbCfg.stopLossCents) {
+          shouldExit = true
+          exitReason = `SL ${(arbCfg.stopLossCents * 100).toFixed(0)}¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+        }
+
         // Low-vol-rider SL: bid down 10¢ AND FV down 5¢ from entry (dual confirm — ignore transient book gaps)
         if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider')
             && exitBid <= existingTrade.entryPrice - 0.10
@@ -485,7 +491,7 @@ async function main() {
           const shares = existingTrade.sizeUsdc / existingTrade.entryPrice
           sellingInProgress.add(windowKey)
           try {
-            const isUrgent = exitReason.startsWith('trailing stop') || exitReason.startsWith('TP') || exitReason.startsWith('emergency') || exitReason.startsWith('rider SL')
+            const isUrgent = exitReason.startsWith('SL ') || exitReason.startsWith('trailing stop') || exitReason.startsWith('TP') || exitReason.startsWith('emergency') || exitReason.startsWith('rider SL')
             const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, exitBid, isUrgent)
 
             if (!sellResult.success) {
