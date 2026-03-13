@@ -49,7 +49,7 @@ export class LowVolRiderStrategy implements Strategy {
     if (marketPrice > dynamicMaxEntry) return null
 
     const edge = fairValue - marketPrice
-    if (edge < this.config.minEdge) return null
+    if (!Number.isFinite(edge) || edge < this.config.minEdge) return null
 
     return {
       side: isUp ? 'YES' : 'NO',

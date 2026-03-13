@@ -448,7 +448,7 @@ async function main() {
         }
 
         // Fixed take-profit at 10¢ (skip when FV > 85¢ confirms held side — avoid premature exit)
-        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10 && fairValue <= 0.85) {
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10 && fairValue < 0.85) {
           shouldExit = true
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
