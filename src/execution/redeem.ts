@@ -48,14 +48,9 @@ export async function redeemPositions(cfg: RedeemCreds, conditionId: string): Pr
     const resp = await relay.execute([{ to: CTF_ADDRESS, data, value: '0' }], `Redeem ${conditionId.slice(0, 10)}`)
     const result = await resp.wait()
 
-    if (result && result.state === 'STATE_CONFIRMED') {
-      logger.info({ txHash: result.transactionHash, conditionId }, 'CTF redemption confirmed (gasless)')
-      return { success: true, txHash: result.transactionHash }
-    }
-
-    // STATE_MINED or STATE_EXECUTED are also acceptable
-    if (result && (result.state === 'STATE_MINED' || result.state === 'STATE_EXECUTED')) {
-      logger.info({ txHash: result.transactionHash, conditionId, state: result.state }, 'CTF redemption submitted')
+    const successStates = new Set(['STATE_CONFIRMED', 'STATE_MINED', 'STATE_EXECUTED'])
+    if (result && successStates.has(result.state)) {
+      logger.info({ txHash: result.transactionHash, conditionId, state: result.state }, 'CTF redemption succeeded')
       return { success: true, txHash: result.transactionHash }
     }
 

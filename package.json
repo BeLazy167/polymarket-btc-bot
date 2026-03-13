@@ -18,6 +18,7 @@
   "dependencies": {
     "@ethersproject/abi": "^5.8.0",
     "@ethersproject/wallet": "^5.8.0",
+    "@noble/hashes": "1.7.2",
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^1.0.0",
     "@polymarket/clob-client": "^5.7.0",

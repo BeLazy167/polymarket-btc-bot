@@ -153,7 +153,7 @@ export class LiveExecutor implements Executor {
     }
   }
 
-  /** Poll balance until filled shares appear on-chain (up to 5s). Uses delta from preFillBalance to handle pre-existing dust. */
+  /** Poll balance via CLOB API until filled shares are visible (up to 5s). Uses delta from preFillBalance to handle pre-existing dust. */
   private async waitForBalanceSettlement(tokenId: string, expectedShares: number, preFillBalance: number = 0): Promise<void> {
     for (let i = 0; i < 5; i++) {
       try {
@@ -165,6 +165,18 @@ export class LiveExecutor implements Executor {
       await Bun.sleep(1000)
     }
     logger.warn({ tokenId, expectedShares, preFillBalance }, 'Balance settlement timeout — shares may not be visible yet')
+  }
+
+  /** Compute avg fill price from total revenue / shares sold, rounded to tick. */
+  private computeFillPrice(sold: number, totalUsdcReceived: number): number | undefined {
+    if (sold <= 0 || totalUsdcReceived <= 0 || !Number.isFinite(sold) || !Number.isFinite(totalUsdcReceived)) return undefined
+    return Math.round(totalUsdcReceived / sold * 100) / 100
+  }
+
+  /** Parse a FAK/GTC order response into ok/taking/making. */
+  private parseOrderResponse(resp: OrderApiResponse): { ok: boolean; taking: number; making: number } {
+    const ok = resp.success !== false && !resp.errorMsg
+    return { ok, taking: Number(resp.takingAmount) || 0, making: Number(resp.makingAmount) || 0 }
   }
 
   async getTokenBalance(tokenId: string): Promise<number> {
@@ -179,7 +191,7 @@ export class LiveExecutor implements Executor {
 
   /**
    * Sell shares. When urgent=true, skips GTC and retries FAK 3x at 500ms intervals
-   * for time-critical exits (trailing stop, TP, emergency dump).
+   * for time-critical exits (trailing stop, TP, rider SL, emergency dump).
    */
   async sell(tokenId: string, _estimatedShares: number, tickSize: TickSize, negRisk?: boolean, bestBid?: number, urgent?: boolean): Promise<ExecutionResult> {
     try {
@@ -197,13 +209,9 @@ export class LiveExecutor implements Executor {
 
       logger.info({ tokenId, realBalance, sellSize, bestBid, urgent, side: 'SELL' }, 'Executing sell')
 
-      // Cancel any outstanding orders that might lock shares
+      // --- Urgent mode: cancel stale orders, then rapid FAK retries ---
       if (urgent) {
         try { await this.client.cancelAll() } catch (e) { logger.warn({ err: e, tokenId }, 'cancelAll before urgent sell failed — FAK may hit locked shares') }
-      }
-
-      // --- Urgent mode: rapid FAK retries, no GTC, no long waits ---
-      if (urgent) {
         return this.urgentSell(tokenId, sellSize, tickSize, negRisk, realBalance)
       }
 
@@ -218,9 +226,7 @@ export class LiveExecutor implements Executor {
           OrderType.FAK,
         )
         lastOrderId = resp.orderID
-        const ok = resp.success !== false && !resp.errorMsg
-        const taking = Number(resp.takingAmount) || 0
-        const making = Number(resp.makingAmount) || 0
+        const { ok, taking, making } = this.parseOrderResponse(resp)
         if (taking > 0) totalUsdcReceived += taking
         if (ok && making > 0) fakSoldShares = making
         logger.info({
@@ -235,7 +241,7 @@ export class LiveExecutor implements Executor {
       await Bun.sleep(2000)
       let remaining = await this.getTokenBalance(tokenId)
 
-      // B1: if FAK said it sold shares but balance hasn't updated, wait longer
+      // If FAK said it sold shares but balance hasn't updated, wait longer
       if (fakSoldShares > 0 && remaining >= realBalance - 0.01) {
         logger.info({ fakSoldShares, remaining, realBalance }, 'FAK matched but balance stale — waiting 3s more')
         await Bun.sleep(3000)
@@ -259,9 +265,7 @@ export class LiveExecutor implements Executor {
               OrderType.GTC,
             )
             lastOrderId = gtcResp.orderID
-            const ok = gtcResp.success !== false && !gtcResp.errorMsg
-            const gtcTaking = Number(gtcResp.takingAmount) || 0
-            const gtcMaking = Number(gtcResp.makingAmount) || 0
+            const { ok, taking: gtcTaking, making: gtcMaking } = this.parseOrderResponse(gtcResp)
             if (gtcTaking > 0) totalUsdcReceived += gtcTaking
             if (ok && gtcMaking > 0) gtcSoldShares = gtcMaking
             logger.info({ orderID: gtcResp.orderID, status: gtcResp.status, errorMsg: gtcResp.errorMsg, takingAmount: gtcResp.takingAmount, makingAmount: gtcResp.makingAmount, gtcPrice, ok, gtcSoldShares }, 'GTC sell response')
@@ -289,9 +293,8 @@ export class LiveExecutor implements Executor {
         logger.warn({ fakSoldShares, gtcSoldShares, balanceSold, remaining, realBalance }, 'Using order response (balance stale)')
       }
 
-      const fillPrice = sold > 0 && totalUsdcReceived > 0 && Number.isFinite(sold) && Number.isFinite(totalUsdcReceived)
-        ? Math.round(totalUsdcReceived / sold * 100) / 100
-        : undefined
+      const fillPrice = this.computeFillPrice(sold, totalUsdcReceived)
+      const revenue = totalUsdcReceived > 0 ? totalUsdcReceived : undefined
 
       if (remaining > 0.5 && remaining < 5) {
         if (sold <= 0) {
@@ -299,18 +302,18 @@ export class LiveExecutor implements Executor {
           return { success: false, orderId: lastOrderId, status: 'no-fill', remaining, error: `Sub-min ${remaining.toFixed(2)} shares — FAK no match` }
         }
         logger.warn({ tokenId, remaining, sold, totalUsdcReceived }, 'Sub-minimum remaining — dust, will settle on-chain')
-        return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined }
+        return { success: true, orderId: lastOrderId, status: 'dust-remaining', filledShares: sold, remaining, fillPrice, revenue }
       }
       if (remaining > 0.5) {
         logger.warn({ tokenId, remaining, sold, realBalance, totalUsdcReceived }, 'Sell incomplete — shares still in wallet')
-        return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined, error: `${remaining.toFixed(2)} shares remain` }
+        return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue, error: `${remaining.toFixed(2)} shares remain` }
       }
 
       logger.info({ sold, remaining, totalUsdcReceived, fillPrice, orderId: lastOrderId }, 'Sell complete')
-      return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined }
+      return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue }
     } catch (err) {
-      logger.error({ err, tokenId }, 'Sell threw')
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      logger.error({ err, tokenId }, 'Sell threw — position state unknown')
+      return { success: false, error: err instanceof Error ? err.message : String(err), status: 'error' }
     }
   }
 
@@ -329,16 +332,15 @@ export class LiveExecutor implements Executor {
           OrderType.FAK,
         )
         lastOrderId = resp.orderID
-        const ok = resp.success !== false && !resp.errorMsg
-        const taking = Number(resp.takingAmount) || 0
-        const making = Number(resp.makingAmount) || 0
+        const { ok, taking, making } = this.parseOrderResponse(resp)
         if (taking > 0) totalUsdcReceived += taking
         if (ok && making > 0) {
           totalSoldShares += making
-          remainingSize = Math.floor((remainingSize - making) * 100) / 100
+          remainingSize = Math.max(Math.floor((remainingSize - making) * 100) / 100, 0)
         }
         logger.info({ attempt: attempt + 1, orderID: resp.orderID, ok, making, taking, totalSoldShares, remainingSize }, 'Urgent FAK sell')
 
+        if (!ok) break  // hard rejection (market halted, auth error) — don't retry
         if (remainingSize <= 0.5) break  // fully sold or dust remaining
       } catch (err) {
         logger.warn({ err, attempt: attempt + 1 }, 'Urgent FAK threw')
@@ -358,15 +360,20 @@ export class LiveExecutor implements Executor {
       remaining = Math.max(realBalance - totalSoldShares, 0)
       balanceSold = totalSoldShares
     }
-    const sold = Math.min(Math.max(balanceSold, totalSoldShares), realBalance)
+    // Trust FAK makingAmount when balance lags — prevents stale-balance retries
+    if (remaining > 0.5 && totalSoldShares >= sellSize * 0.9) {
+      logger.info({ remaining, totalSoldShares, sellSize }, 'Urgent sell: trusting FAK (balance stale)')
+      remaining = 0
+      balanceSold = totalSoldShares
+    }
 
-    const fillPrice = sold > 0 && totalUsdcReceived > 0
-      ? Math.round(totalUsdcReceived / sold * 100) / 100
-      : undefined
+    const sold = Math.min(Math.max(balanceSold, totalSoldShares), realBalance)
+    const fillPrice = this.computeFillPrice(sold, totalUsdcReceived)
+    const revenue = totalUsdcReceived > 0 ? totalUsdcReceived : undefined
 
     if (remaining > 0.5) {
       logger.warn({ remaining, sold, totalUsdcReceived, attempts: 3 }, 'Urgent sell incomplete')
-      return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined, error: `Urgent: ${remaining.toFixed(2)} remain after 3 FAK` }
+      return { success: false, orderId: lastOrderId, status: 'incomplete', filledShares: sold, remaining, fillPrice, revenue, error: `Urgent: ${remaining.toFixed(2)} remain after 3 FAK` }
     }
 
     if (sold <= 0) {
@@ -375,6 +382,6 @@ export class LiveExecutor implements Executor {
     }
 
     logger.info({ sold, remaining, totalUsdcReceived, fillPrice }, 'Urgent sell complete')
-    return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue: totalUsdcReceived > 0 ? totalUsdcReceived : undefined }
+    return { success: true, orderId: lastOrderId, status: 'filled', filledShares: sold, remaining, fillPrice, revenue }
   }
 }

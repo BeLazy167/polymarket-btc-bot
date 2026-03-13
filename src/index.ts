@@ -269,9 +269,7 @@ async function main() {
               const exitBid = exitBook?.bestBid ?? 0
               const soldShares = sellResult.filledShares ?? shares
               const exitPrice = sellResult.fillPrice ?? exitBid
-              const revenue = sellResult.revenue !== undefined
-                ? (trade.partialRevenue ?? 0) + sellResult.revenue
-                : soldShares * Math.max(exitBid, 0.01) * 0.98
+              const revenue = computeRevenue(sellResult.revenue, trade.partialRevenue ?? 0, soldShares, exitBid)
               const pnl = revenue - trade.sizeUsdc
 
               riskManager.recordTrade(MARKET_ID, pnl)
@@ -387,7 +385,6 @@ async function main() {
 
       // Build strategy context
       const windowKey = `${MARKET_ID}-${currentMarket.epoch}`
-      const sumDepth = (levels: Array<{ size: number }>) => levels.reduce((s, l) => s + l.size, 0)
       const ctx: StrategyContext = {
         currentPrice,
         referencePrice,
@@ -450,8 +447,8 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Fixed take-profit at 10¢
-        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10) {
+        // Fixed take-profit at 10¢ (skip when FV > 85¢ confirms held side — avoid premature exit)
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10 && fairValue <= 0.85) {
           shouldExit = true
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
@@ -459,7 +456,7 @@ async function main() {
         // Low-vol-rider SL: bid down 10¢ AND FV down 5¢ from entry (dual confirm — ignore transient book gaps)
         if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider')
             && exitBid <= existingTrade.entryPrice - 0.10
-            && (!Number.isFinite(fairValue) || fairValue < existingTrade.entryPrice - 0.05)) {
+            && Number.isFinite(fairValue) && fairValue < existingTrade.entryPrice - 0.05) {
           shouldExit = true
           exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, fv ${(fairValue * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
@@ -512,10 +509,7 @@ async function main() {
 
             const soldShares = sellResult.filledShares ?? shares
             const actualExitPrice = sellResult.fillPrice ?? exitBid
-            // Only combine partialRevenue with actual CLOB data; if estimating, don't add partial to avoid double-count
-            const revenue = sellResult.revenue !== undefined
-              ? (existingTrade.partialRevenue ?? 0) + sellResult.revenue
-              : soldShares * exitBid * 0.98
+            const revenue = computeRevenue(sellResult.revenue, existingTrade.partialRevenue ?? 0, soldShares, exitBid)
             const pnl = revenue - existingTrade.sizeUsdc
 
             riskManager.recordTrade(MARKET_ID, pnl)
@@ -698,6 +692,16 @@ async function main() {
 }
 
 // --- Helpers ---
+
+function sumDepth(levels: Array<{ size: number }>): number {
+  return levels.reduce((s, l) => s + l.size, 0)
+}
+
+/** Compute sell revenue: prefer CLOB data + partial, fall back to estimated. */
+function computeRevenue(sellRevenue: number | undefined, partialRevenue: number, soldShares: number, exitBid: number): number {
+  if (sellRevenue !== undefined) return partialRevenue + sellRevenue
+  return soldShares * Math.max(exitBid, 0.01) * 0.98
+}
 
 function fmtPnl(pnl: number): string {
   return pnl >= 0 ? color.green(`+$${pnl.toFixed(2)}`) : color.red(`-$${Math.abs(pnl).toFixed(2)}`)
