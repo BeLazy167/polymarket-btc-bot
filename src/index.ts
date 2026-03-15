@@ -189,6 +189,9 @@ async function main() {
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
+      // Wait 10s for Polymarket to settle the open price
+      await Bun.sleep(10_000)
+
       const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
 
       if (!refPrice) {
@@ -197,7 +200,7 @@ async function main() {
         return
       }
 
-      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
+      const cooldownSec = WINDOW_SEC >= 900 ? 20 : 5
       stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
 
       // Redeem any resolved positions during cooldown (winning tokens → USDC.e, gasless via relayer)
