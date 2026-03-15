@@ -383,6 +383,12 @@ async function main() {
         modelTag = `F${config.models.studentTNu}`
       }
 
+      // Skip trading on fat-tails models — only trade on [C]
+      if (modelTag !== 'C') {
+        logger.debug({ modelTag, sigma }, 'Skipping trade — fat-tails regime')
+        return
+      }
+
       // Build strategy context
       const windowKey = `${MARKET_ID}-${currentMarket.epoch}`
       const ctx: StrategyContext = {
@@ -447,8 +453,8 @@ async function main() {
           exitReason = `bid ${(exitBid * 100).toFixed(0)}¢ >= FV ${(fairValue * 100).toFixed(0)}¢`
         }
 
-        // Fixed take-profit at 10¢ (skip when FV > 85¢ confirms held side — avoid premature exit)
-        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10 && fairValue < 0.85) {
+        // Fixed take-profit at 10¢ (skip when FV > 85¢ confirms held side — UNLESS bid >= 93¢ where upside is capped)
+        if (!shouldExit && exitBid >= existingTrade.entryPrice + 0.10 && (fairValue < 0.85 || exitBid >= 0.93)) {
           shouldExit = true
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
@@ -467,8 +473,8 @@ async function main() {
           exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, fv ${(fairValue * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
-        // Edge-relative trailing stop (not for low-vol-rider, skip when FV > 85¢ confirms held side)
-        const fvConfirmsPosition = Number.isFinite(fairValue) && fairValue > 0.85
+        // Edge-relative trailing stop (not for low-vol-rider, skip when FV > 85¢ confirms held side — UNLESS bid >= 93¢)
+        const fvConfirmsPosition = Number.isFinite(fairValue) && fairValue > 0.85 && exitBid < 0.93
         if (!shouldExit && existingTrade.peakBid && !existingTrade.strategy.startsWith('low-vol-rider') && !fvConfirmsPosition) {
           const stopWidth = existingTrade.edge * 0.60
           const profitFromEntry = existingTrade.peakBid - existingTrade.entryPrice
