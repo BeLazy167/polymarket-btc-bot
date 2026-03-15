@@ -386,12 +386,6 @@ async function main() {
         modelTag = `F${config.models.studentTNu}`
       }
 
-      // Skip trading on fat-tails models — only trade on [C]
-      if (modelTag !== 'C') {
-        logger.debug({ modelTag, sigma }, 'Skipping trade — fat-tails regime')
-        return
-      }
-
       // Build strategy context
       const windowKey = `${MARKET_ID}-${currentMarket.epoch}`
       const ctx: StrategyContext = {
@@ -567,6 +561,9 @@ async function main() {
 
         return // already have a position (or just exited), skip new entries this tick
       }
+
+      // Skip new entries on fat-tails models — only trade on [C]
+      if (modelTag !== 'C') return
 
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
