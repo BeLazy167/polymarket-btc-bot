@@ -185,23 +185,12 @@ async function main() {
         return
       }
 
-      // Re-subscribe Polymarket WS early so orderbook populates while we fetch open price
+      // Re-subscribe Polymarket WS early so orderbook populates during cooldown
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
-      // Wait 10s for Polymarket to settle the open price
-      await Bun.sleep(10_000)
-
-      const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
-
-      if (!refPrice) {
-        stdout(`${tag.warn} Ref price unavailable — skipping window`)
-        lastFailedRefresh = Date.now()
-        return
-      }
-
-      const cooldownSec = WINDOW_SEC >= 900 ? 20 : 5
-      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
+      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
 
       // Redeem any resolved positions during cooldown (winning tokens → USDC.e, gasless via relayer)
       if (config.mode === 'live' && pendingRedemptions.size > 0) {
@@ -220,6 +209,17 @@ async function main() {
       }
 
       await Bun.sleep(cooldownSec * 1_000)
+
+      // Fetch ref price AFTER cooldown so API has settled
+      const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+
+      if (!refPrice) {
+        stdout(`${tag.warn} Ref price unavailable — skipping window`)
+        lastFailedRefresh = Date.now()
+        return
+      }
+
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))}`)
 
       // Commit state AFTER sleep so tick loop won't trade during wait
       currentMarket = market
