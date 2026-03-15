@@ -95,6 +95,8 @@ async function main() {
   const buyingInProgress = new Set<string>()
   const MAX_TRADES_PER_WINDOW = 2
   const windowTradeCount = new Map<string, number>()
+  /** Track which half (1 or 2) the last trade entered in */
+  const windowTradeHalf = new Map<string, number>()
   let tradeCount = 0
   let winCount = 0
   let lastTickLog = 0
@@ -330,6 +332,7 @@ async function main() {
         sellingInProgress.clear()
         buyingInProgress.clear()
         windowTradeCount.clear()
+        windowTradeHalf.clear()
         orderbookStates.clear()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
@@ -571,6 +574,11 @@ async function main() {
       // Skip new entries if max trades per window reached
       if ((windowTradeCount.get(windowKey) ?? 0) >= MAX_TRADES_PER_WINDOW) return
 
+      // Enforce one trade per half: if already traded in this half, skip
+      const currentHalf = elapsed < WINDOW_SEC / 2 ? 1 : 2
+      const lastHalf = windowTradeHalf.get(windowKey)
+      if (lastHalf === currentHalf) return
+
       // No new entries in last 15s — not enough time to fill + sell
       if (elapsed >= WINDOW_SEC - 15) {
         logger.debug({ elapsed, cutoff: WINDOW_SEC - 15 }, 'Skipping entry — 15s cutoff')
@@ -640,6 +648,7 @@ async function main() {
 
             riskManager.openPosition(MARKET_ID)
             tradeCount++
+            windowTradeHalf.set(windowKey, elapsed < WINDOW_SEC / 2 ? 1 : 2)
 
             stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(actualPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('│')} ${color.cyan(actualShares.toFixed(1) + ' shares')} ${color.dim('$' + (actualShares * actualPrice).toFixed(2))}`)
 
