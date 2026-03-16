@@ -1,11 +1,9 @@
+import { Effect } from 'effect'
 import { Wallet } from '@ethersproject/wallet'
-import { JsonRpcProvider } from '@ethersproject/providers'
-
-const POLYGON_RPC = process.env.POLYGON_RPC_URL ?? 'https://polygon-bor-rpc.publicnode.com'
 import { Interface } from '@ethersproject/abi'
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client'
 import { BuilderConfig } from '@polymarket/builder-signing-sdk'
-import { logger } from '../monitoring/logger.ts'
+import { RedemptionError } from '../errors.ts'
 
 const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045'
 const USDC_E = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'
@@ -30,14 +28,14 @@ interface RedeemCreds {
  * Calls CTF redeemPositions with indexSets [1, 2] to cover both YES/NO outcomes.
  * Uses PROXY relay for signatureType=1 (magic/email), SAFE for signatureType=0.
  */
-export async function redeemPositions(cfg: RedeemCreds, conditionId: string): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  try {
-    const provider = new JsonRpcProvider(POLYGON_RPC)
-    const wallet = new Wallet(cfg.privateKey, provider)
+export const redeemPositions = (cfg: RedeemCreds, conditionId: string): Effect.Effect<{ success: boolean; txHash?: string; error?: string }, RedemptionError> =>
+  Effect.gen(function* () {
+    const wallet = new Wallet(cfg.privateKey)
     const builderConfig = new BuilderConfig({
       localBuilderCreds: { key: cfg.apiKey, secret: cfg.apiSecret, passphrase: cfg.apiPassphrase },
     })
     const relayType = cfg.signatureType === 1 ? RelayerTxType.PROXY : RelayerTxType.SAFE
+    // BuilderConfig from builder-signing-sdk vs clob-client's nested copy — same shape, different declarations
     const relay = new RelayClient(RELAYER_URL, POLYGON_CHAIN_ID, wallet, builderConfig as never, relayType)
 
     const data = ctfIface.encodeFunctionData('redeemPositions', [
@@ -47,27 +45,39 @@ export async function redeemPositions(cfg: RedeemCreds, conditionId: string): Pr
       [1, 2],
     ])
 
-    logger.info({ conditionId, wallet: wallet.address, relayType }, 'Attempting gasless CTF redemption')
+    yield* Effect.log('Attempting gasless CTF redemption', { conditionId, wallet: wallet.address, relayType })
 
-    const resp = await relay.execute([{ to: CTF_ADDRESS, data, value: '0' }], `Redeem ${conditionId.slice(0, 10)}`)
-    const result = await resp.wait()
+    const resp = yield* Effect.tryPromise({
+      try: () => relay.execute([{ to: CTF_ADDRESS, data, value: '0' }], `Redeem ${conditionId.slice(0, 10)}`),
+      catch: (e) => new RedemptionError({ message: e instanceof Error ? e.message : String(e), conditionId }),
+    })
+
+    const result = yield* Effect.tryPromise({
+      try: () => resp.wait(),
+      catch: (e) => new RedemptionError({ message: `wait() failed: ${e}`, conditionId }),
+    })
 
     const successStates = new Set(['STATE_CONFIRMED', 'STATE_MINED', 'STATE_EXECUTED'])
     if (result && successStates.has(result.state)) {
-      logger.info({ txHash: result.transactionHash, conditionId, state: result.state }, 'CTF redemption succeeded')
+      yield* Effect.log('CTF redemption succeeded', { txHash: result.transactionHash, conditionId, state: result.state })
       return { success: true, txHash: result.transactionHash }
     }
 
     const state = result?.state ?? 'no-result'
-    logger.warn({ conditionId, state, txId: resp.transactionID }, 'CTF redemption did not confirm')
+    yield* Effect.logWarning('CTF redemption did not confirm', { conditionId, state, txId: resp.transactionID })
     return { success: false, error: state }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('revert') || msg.includes('no tokens') || msg.includes('not resolved')) {
-      logger.debug({ conditionId, err: msg }, 'CTF redemption skipped — market not resolved or no tokens')
-      return { success: false, error: 'not-resolved' }
-    }
-    logger.warn({ conditionId, err }, 'CTF redemption failed')
-    return { success: false, error: msg }
-  }
-}
+  }).pipe(
+    Effect.catchTag('RedemptionError', (e) => {
+      const msg = e.message
+      if (msg.includes('revert') || msg.includes('no tokens') || msg.includes('not resolved')) {
+        return Effect.gen(function* () {
+          yield* Effect.logDebug('CTF redemption skipped — market not resolved or no tokens', { conditionId, err: msg })
+          return { success: false, error: 'not-resolved' }
+        })
+      }
+      return Effect.gen(function* () {
+        yield* Effect.logWarning('CTF redemption failed', { conditionId, err: msg })
+        return { success: false, error: msg }
+      })
+    }),
+  )

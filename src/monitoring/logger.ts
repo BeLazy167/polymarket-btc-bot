@@ -1,9 +1,3 @@
-import pino from 'pino'
-
-export const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-})
-
 // ANSI escape helpers
 const esc = (code: string) => `\x1b[${code}m`
 const reset = esc('0')

@@ -1,0 +1,26 @@
+mode: paper
+arbEnabled: true
+windowDurationSec: 3600
+
+# Disable all model strategies — arb only
+strategies:
+  momentum:
+    enabled: false
+  lowVolRider:
+    enabled: false
+  microstructure:
+    enabled: false
+  fairValueArb:
+    enabled: false
+  value:
+    enabled: false
+
+risk:
+  positionSizeUsdc: 5
+  maxDailyLossUsdc: 50
+
+polymarket:
+  privateKey: ""
+  apiKey: ""
+  apiSecret: ""
+  apiPassphrase: ""

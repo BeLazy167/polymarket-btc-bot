@@ -1,9 +1,8 @@
-mode: live
+mode: paper
 logLevel: debug
-windowDurationSec: 900
 
 models:
-  fifteenMin: fat-tails
+  fiveMin: fat-tails
   garchOmega: 0.000001
   garchAlpha: 0.1
   garchBeta: 0.85
@@ -14,30 +13,33 @@ models:
 
 strategies:
   momentum:
-    enabled: false
+    enabled: true
   lowVolRider:
-    enabled: false
-    activateLastSec: 120
-    minSigmaGap: 1.5
+    enabled: true
+    activateLastSec: 30
+    minSigmaGap: 4
     minFairValue: 0.90
-    maxEntryPrice: 0.93
+    maxEntryPrice: 0.88
+    minEdge: 0.03
+  microstructure:
+    enabled: true
+    imbalanceActiveSec: 120
+    minDepthRatio: 3
+    minImbalanceEdge: 0.05
+    gapActiveSec: 45
+    minSpreadForGap: 0.08
+    minGapEdge: 0.03
   fairValueArb:
     enabled: true
-    minGap: 0.13
+    minGap: 0.15
     minFairValue: 0.70
     minEntryPrice: 0.15
-    maxEntryPrice: 0.93
+    maxEntryPrice: 0.75
     exitAtFairValue: true
     takeProfitCents: 0
   value:
     enabled: true
     minFairValue: 0.30
-  cvdDivergence:
-    enabled: true
-    windowSec: 180
-    divPriceThreshold: 50
-    divCvdThreshold: 10
-    pullbackPct: 0.30
 
 timeFilter:
   skipDays: []
@@ -51,7 +53,5 @@ risk:
 
 telegram:
   enabled: true
-
-polymarket:
-  privateKey: ""
-  apiKey: ""
+  botToken: ""
+  chatId: ""

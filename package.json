@@ -10,7 +10,8 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "drizzle-kit": "^0.31.9"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -22,6 +23,8 @@
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^1.0.0",
     "@polymarket/clob-client": "^5.7.0",
+    "drizzle-orm": "^0.45.1",
+    "effect": "^3.19.19",
     "pino": "^10.3.1",
     "valibot": "^1.2.0",
     "yaml": "^2.8.2"

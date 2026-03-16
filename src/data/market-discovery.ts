@@ -1,5 +1,7 @@
-import { logger } from '../monitoring/logger.ts'
-import { getWindowMeta } from '../config/markets.ts'
+import { Effect, Context, Layer, Schedule } from 'effect'
+import { ConfigService } from '../config/service.ts'
+import { buildSlug } from '../config/markets.ts'
+import { MarketDiscoveryError } from '../errors.ts'
 
 export interface LiveMarket {
   epoch: number
@@ -25,104 +27,152 @@ export function getWindowEpoch(nowMs: number, windowSec: number, offset = 0): nu
   return Math.floor(nowSec / windowSec) * windowSec + offset * windowSec
 }
 
+export class MarketDiscovery extends Context.Tag('MarketDiscovery')<
+  MarketDiscovery,
+  {
+    readonly fetchCurrentMarket: Effect.Effect<LiveMarket | null, MarketDiscoveryError>
+    readonly fetchOpenPrice: (epochSec: number) => Effect.Effect<number | null, MarketDiscoveryError>
+  }
+>() {}
+
 /**
- * Fetches market data for a specific window epoch from Gamma API.
- * Returns null if market doesn't exist yet (e.g. too far in future).
+ * Internal: fetches market data for a specific window epoch from Gamma API.
  */
-export async function fetchMarket(epoch: number, windowSec: number): Promise<LiveMarket | null> {
-  const { slugPrefix } = getWindowMeta(windowSec)
-  const slug = `${slugPrefix}${epoch}`
-  const url = `${GAMMA_BASE}/${slug}`
+const fetchMarket = (
+  epoch: number,
+  windowSec: number,
+  _slugPrefix?: string,
+): Effect.Effect<LiveMarket | null, MarketDiscoveryError> =>
+  Effect.gen(function* () {
+    const slug = buildSlug(windowSec, epoch)
+    const url = `${GAMMA_BASE}/${slug}`
 
-  const res = await fetch(url)
-  if (!res.ok) {
-    logger.warn({ status: res.status, slug }, 'Gamma API fetch failed')
-    return null
-  }
+    const res = yield* Effect.tryPromise({
+      try: () => fetch(url),
+      catch: (e) => new MarketDiscoveryError({ message: `Gamma fetch failed: ${e}`, slug }),
+    })
 
-  const data = await res.json() as {
-    negRisk?: boolean
-    markets?: Array<{
-      conditionId: string
-      clobTokenIds: string
-      orderPriceMinTickSize?: number
-    }>
-  }
-
-  const market = data?.markets?.[0]
-  if (!market) {
-    logger.warn({ slug }, 'No market in Gamma response')
-    return null
-  }
-
-  const tokenIds: string[] = JSON.parse(market.clobTokenIds)
-  if (tokenIds.length < 2) {
-    logger.warn({ slug, tokenIds }, 'Unexpected clobTokenIds length')
-    return null
-  }
-
-  // Fetch min_order_size from CLOB orderbook
-  let minOrderSize = 5 // safe fallback
-  try {
-    const obRes = await fetch(`https://clob.polymarket.com/orderbook/${tokenIds[0]}`)
-    if (obRes.ok) {
-      const ob = await obRes.json() as { min_order_size?: string }
-      const parsed = Number(ob.min_order_size)
-      if (Number.isFinite(parsed) && parsed > 0) minOrderSize = parsed
+    if (!res.ok) {
+      yield* Effect.logWarning(`Gamma API fetch failed status=${res.status} slug=${slug}`)
+      return null
     }
-  } catch {
-    logger.warn({ slug }, 'Failed to fetch min_order_size — using default 5')
-  }
 
-  return {
-    epoch,
-    slug,
-    conditionId: market.conditionId,
-    yesTokenId: tokenIds[0]!,
-    noTokenId: tokenIds[1]!,
-    tickSize: String(market.orderPriceMinTickSize ?? '0.01'),
-    negRisk: data.negRisk ?? false,
-    minOrderSize,
-    windowStartMs: epoch * 1000,
-    windowEndMs: (epoch + windowSec) * 1000,
-  }
-}
+    const data = yield* Effect.tryPromise({
+      try: () =>
+        res.json() as Promise<{
+          negRisk?: boolean
+          markets?: Array<{
+            conditionId: string
+            clobTokenIds: string
+            orderPriceMinTickSize?: number
+          }>
+        }>,
+      catch: (e) => new MarketDiscoveryError({ message: `Gamma JSON parse failed: ${e}`, slug }),
+    })
 
-/**
- * Fetches current window market. Retries up to 3 times with 2s delay.
- */
-export async function fetchCurrentMarket(windowSec: number): Promise<LiveMarket | null> {
-  const epoch = getWindowEpoch(Date.now(), windowSec)
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const market = await fetchMarket(epoch, windowSec)
-    if (market) return market
-    if (attempt < 2) await Bun.sleep(2000)
-  }
-  return null
-}
+    const market = data?.markets?.[0]
+    if (!market) {
+      yield* Effect.logWarning(`No market in Gamma response slug=${slug}`)
+      return null
+    }
 
-/**
- * Fetches BTC open price from Polymarket's crypto-price API.
- * Uses ISO dates and correct variant names (e.g. 'fifteen' not 'fifteenminute').
- */
-export async function fetchOpenPrice(epochSec: number, windowSec: number): Promise<number | null> {
-  const { cryptoVariant } = getWindowMeta(windowSec)
-  const start = new Date(epochSec * 1000).toISOString()
-  const end = new Date((epochSec + windowSec) * 1000).toISOString()
-  const url = `https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=${start}&variant=${cryptoVariant}&endDate=${end}`
+    const tokenIds: string[] = JSON.parse(market.clobTokenIds)
+    if (tokenIds.length < 2) {
+      yield* Effect.logWarning(`Unexpected clobTokenIds length slug=${slug} ids=${tokenIds}`)
+      return null
+    }
 
-  const res = await fetch(url)
-  if (!res.ok) {
-    logger.error({ status: res.status, epochSec }, 'crypto-price API fetch failed')
-    return null
-  }
+    // Fetch min_order_size from CLOB orderbook
+    let minOrderSize = 5 // safe fallback
+    const obResult = yield* Effect.tryPromise({
+      try: () => fetch(`https://clob.polymarket.com/orderbook/${tokenIds[0]}`),
+      catch: () => null,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null)))
 
-  const data = await res.json() as { openPrice?: number | null }
-  if (!data.openPrice || !Number.isFinite(data.openPrice)) {
-    logger.warn({ epochSec, data }, 'crypto-price API returned no openPrice')
-    return null
-  }
+    if (obResult && obResult.ok) {
+      const ob = yield* Effect.tryPromise({
+        try: () => obResult.json() as Promise<{ min_order_size?: string }>,
+        catch: () => null,
+      }).pipe(Effect.catchAll(() => Effect.succeed(null)))
 
-  logger.info({ epochSec, openPrice: data.openPrice }, 'Fetched open price from Polymarket')
-  return data.openPrice
-}
+      if (ob) {
+        const parsed = Number(ob.min_order_size)
+        if (Number.isFinite(parsed) && parsed > 0) minOrderSize = parsed
+      }
+    } else {
+      yield* Effect.logWarning(`Failed to fetch min_order_size — using default 5 slug=${slug}`)
+    }
+
+    return {
+      epoch,
+      slug,
+      conditionId: market.conditionId,
+      yesTokenId: tokenIds[0]!,
+      noTokenId: tokenIds[1]!,
+      tickSize: String(market.orderPriceMinTickSize ?? '0.01'),
+      negRisk: data.negRisk ?? false,
+      minOrderSize,
+      windowStartMs: epoch * 1000,
+      windowEndMs: (epoch + windowSec) * 1000,
+    } satisfies LiveMarket
+  })
+
+export const MarketDiscoveryLive = Layer.effect(
+  MarketDiscovery,
+  Effect.gen(function* () {
+    const { windowSec, windowMeta } = yield* ConfigService
+
+    return {
+      fetchCurrentMarket: Effect.gen(function* () {
+        const epoch = getWindowEpoch(Date.now(), windowSec)
+
+        const retrySchedule = Schedule.intersect(
+          Schedule.recurs(2),
+          Schedule.spaced(2000),
+        )
+
+        const result = yield* fetchMarket(epoch, windowSec, windowMeta.slugPrefix).pipe(
+          Effect.flatMap((m) =>
+            m ? Effect.succeed(m) : Effect.fail('no-market' as const),
+          ),
+          Effect.retry(retrySchedule),
+          Effect.catchAll(() => Effect.succeed(null as LiveMarket | null)),
+        )
+
+        return result
+      }),
+
+      fetchOpenPrice: (epochSec: number) =>
+        Effect.gen(function* () {
+          const start = new Date(epochSec * 1000).toISOString()
+          const end = new Date((epochSec + windowSec) * 1000).toISOString()
+          const url = `https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=${start}&variant=${windowMeta.cryptoVariant}&endDate=${end}`
+
+          const res = yield* Effect.tryPromise({
+            try: () => fetch(url),
+            catch: (e) =>
+              new MarketDiscoveryError({ message: `crypto-price fetch failed: ${e}`, status: 0 }),
+          })
+
+          if (!res.ok) {
+            yield* Effect.logError(`crypto-price API fetch failed status=${res.status} epochSec=${epochSec}`)
+            return null
+          }
+
+          const data = yield* Effect.tryPromise({
+            try: () => res.json() as Promise<{ openPrice?: number | null }>,
+            catch: (e) =>
+              new MarketDiscoveryError({ message: `crypto-price JSON parse failed: ${e}` }),
+          })
+
+          if (!data.openPrice || !Number.isFinite(data.openPrice)) {
+            yield* Effect.logWarning(`crypto-price API returned no openPrice epochSec=${epochSec}`)
+            return null
+          }
+
+          yield* Effect.log(`Fetched open price from Polymarket epochSec=${epochSec} openPrice=${data.openPrice}`)
+          return data.openPrice
+        }),
+    }
+  }),
+)

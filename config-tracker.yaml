@@ -1,0 +1,33 @@
+mode: paper
+
+risk:
+  maxTotalExposure: 200
+  maxPerMarket: 20
+  maxDailyLoss: 100
+
+scanner:
+  ninetyEightPollSec: 120
+  nearResolutionPollSec: 90
+  minLiquidity: 5000
+
+smartMoney:
+  insiderPollSec: 5
+  insiderAnalyzeSec: 60
+  sweepsPollSec: 60
+  whalePollSec: 10
+  whaleCount: 20
+
+scoring:
+  paperThreshold: 60
+
+blacklist:
+  - elon
+  - tweet
+  - musk
+  - bitcoin up or down
+  - ethereum up or down
+  - solana up or down
+  - xrp up or down
+  - btc
+  - eth
+  - sol

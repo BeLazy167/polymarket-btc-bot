@@ -191,6 +191,8 @@ export const ConfigSchema = v.object({
   risk: v.optional(RiskSchema, {}),
   telegram: v.optional(TelegramSchema, {}),
   polymarket: PolymarketAuthSchema,
+  /** Enable arb scanner — buy both sides when YES ask + NO ask < 1.00 */
+  arbEnabled: v.optional(v.boolean(), false),
   /** Window duration in seconds (300 = 5m, 900 = 15m) */
   windowDurationSec: v.optional(v.pipe(v.number(), v.minValue(60)), 300),
   /** Log level */
