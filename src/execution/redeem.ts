@@ -34,7 +34,7 @@ export async function redeemPositions(cfg: RedeemCreds, conditionId: string): Pr
       localBuilderCreds: { key: cfg.apiKey, secret: cfg.apiSecret, passphrase: cfg.apiPassphrase },
     })
     const relayType = cfg.signatureType === 1 ? RelayerTxType.PROXY : RelayerTxType.SAFE
-    const relay = new RelayClient(RELAYER_URL, POLYGON_CHAIN_ID, wallet, builderConfig, relayType)
+    const relay = new RelayClient(RELAYER_URL, POLYGON_CHAIN_ID, wallet, builderConfig as never, relayType)
 
     const data = ctfIface.encodeFunctionData('redeemPositions', [
       USDC_E,

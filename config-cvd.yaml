@@ -1,0 +1,35 @@
+mode: paper
+logLevel: debug
+windowDurationSec: 300
+
+models:
+  fifteenMin: fat-tails
+
+strategies:
+  momentum:
+    enabled: false
+  lowVolRider:
+    enabled: false
+  microstructure:
+    enabled: false
+  fairValueArb:
+    enabled: false
+  value:
+    enabled: false
+  cvdDivergence:
+    enabled: true
+    windowSec: 180
+    divPriceThreshold: 50
+    divCvdThreshold: 10
+    pullbackPct: 0.30
+
+risk:
+  positionSizeUsdc: 2.50
+  maxDailyLossUsdc: 10
+  maxConcurrentPositions: 2
+
+polymarket:
+  privateKey: ""
+  apiKey: ""
+  apiSecret: ""
+  apiPassphrase: ""

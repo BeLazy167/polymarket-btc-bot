@@ -14,6 +14,7 @@ import { LowVolRiderStrategy } from './strategies/low-vol-rider.ts'
 import { MicrostructureStrategy } from './strategies/microstructure.ts'
 import { FairValueArbStrategy } from './strategies/fair-value-arb.ts'
 import { ValueStrategy } from './strategies/value.ts'
+import { CvdDivergenceStrategy } from './strategies/cvd-divergence.ts'
 import type { Strategy } from './strategies/base.ts'
 import { RiskManager } from './risk/manager.ts'
 import { LiveExecutor, type Executor } from './execution/executor.ts'
@@ -66,6 +67,8 @@ async function main() {
   if (config.strategies.microstructure.enabled) strategies.push(new MicrostructureStrategy(config.strategies.microstructure))
   if (config.strategies.fairValueArb.enabled) strategies.push(new FairValueArbStrategy(config.strategies.fairValueArb))
   if (config.strategies.value.enabled) strategies.push(new ValueStrategy(config.strategies.value))
+  const cvdStrategy = new CvdDivergenceStrategy(config.strategies.cvdDivergence)
+  if (config.strategies.cvdDivergence.enabled) strategies.push(cvdStrategy)
 
   stdout(`${color.dim(box.arrow)} Strategies: ${color.bold(strategies.map(s => s.name).join(color.dim(' │ ')))}`)
 
@@ -105,6 +108,9 @@ async function main() {
 
   // --- Data feeds ---
   const binanceWS = createBinanceWS({
+    onTrade(price, qty, isBuyerMaker, ts) {
+      cvdStrategy.recordTick(price, qty, isBuyerMaker, ts)
+    },
     onPrice(price, timestamp) {
       lastPrice = price
       lastPriceTimestamp = Date.now()
@@ -434,7 +440,10 @@ async function main() {
 
       // --- Check exits for open positions ---
       const existingTrade = openTrades.get(windowKey)
-      if (existingTrade) {
+      // CVD trades hold to resolution — no early exits, skip to next tick
+      if (existingTrade && existingTrade.strategy.startsWith('cvd-')) {
+        return
+      } else if (existingTrade) {
         const exitBid = (existingTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
         const fairValue = existingTrade.side === 'YES' ? fv.fairValueUp : fv.fairValueDown
         const arbCfg = config.strategies.fairValueArb
@@ -591,7 +600,17 @@ async function main() {
         const approved = riskManager.approve(signal, MARKET_ID)
         if (!approved) continue
 
-        const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
+        let entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
+
+        // Stink bid for CVD signals + CVD-specific sizing
+        if (signal.strategy.startsWith('cvd-')) {
+          const bid = signal.side === 'YES' ? (yesBook.bestBid ?? 0) : (noBook.bestBid ?? 0)
+          if (bid <= 0) continue
+          entryPrice = Math.round(bid * (1 - cvdStrategy.pullbackPct) * 100) / 100
+          if (entryPrice < 0.01) entryPrice = 0.01
+          approved.sizeUsdc = config.strategies.cvdDivergence.positionSizeUsdc
+        }
+
         approved.price = entryPrice
         approved.sigma = sigma
 

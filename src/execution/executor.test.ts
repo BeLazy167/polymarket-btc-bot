@@ -1,3 +1,4 @@
+// @ts-nocheck — Bun mock.calls typing doesn't support indexed tuple access
 import { test, expect, describe, mock } from 'bun:test'
 import { LiveExecutor } from './executor.ts'
 
@@ -105,8 +106,8 @@ describe('sell() — B2: GTC at bestBid', () => {
     await executor.sell('token-1', 6, '0.01', false, 0.89)
 
     // Verify GTC was called with bestBid-1¢ = 0.88, not 0.01
-    const gtcCall = client.createAndPostOrder.mock.calls[0]
-    expect(gtcCall[0].price).toBe(0.88)
+    const gtcCall = client.createAndPostOrder.mock.calls[0]!
+    expect(gtcCall[0]!.price).toBe(0.88)
   })
 
   test('GTC fallback at 1¢ when no bestBid provided', async () => {
@@ -120,8 +121,8 @@ describe('sell() — B2: GTC at bestBid', () => {
     await executor.sell('token-1', 6, '0.01', false) // no bestBid
 
     expect(client.createAndPostOrder.mock.calls.length).toBeGreaterThan(0)
-    const gtcCall = client.createAndPostOrder.mock.calls[0]
-    expect(gtcCall[0].price).toBe(0.01)
+    const gtcCall = client.createAndPostOrder.mock.calls[0]!
+    expect(gtcCall[0]!.price).toBe(0.01)
   })
 })
 
@@ -182,7 +183,7 @@ describe('execute() — Layer A: buy minOrderSize+1', () => {
     )
 
     // Verify size=6 was sent (minOrderSize 5 + 1)
-    const buyCall = client.createAndPostOrder.mock.calls[0]
-    expect(buyCall[0].size).toBe(6)
+    const buyCall = client.createAndPostOrder.mock.calls[0]!
+    expect(buyCall[0]!.size).toBe(6)
   })
 })

@@ -76,7 +76,7 @@ async function main() {
     conditionId: market.conditionId,
     yesTokenId: market.yesTokenId,
     noTokenId: market.noTokenId,
-    tickSize: market.tickSize,
+    tickSize: (market.tickSize || '0.01') as '0.1' | '0.01' | '0.001' | '0.0001',
     negRisk: market.negRisk,
     minOrderSize: market.minOrderSize,
   }

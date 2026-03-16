@@ -2,6 +2,7 @@ export type BinanceStreamType = 'aggTrade' | 'kline' | 'bookTicker'
 
 export interface BinanceWSOptions {
   onPrice: (price: number, timestamp: number) => void
+  onTrade?: (price: number, qty: number, isBuyerMaker: boolean, ts: number) => void
   onError?: (error: Error) => void
   onConnect?: () => void
   onDisconnect?: () => void
@@ -16,6 +17,7 @@ interface AggTradeEvent {
   s: string   // symbol
   p: string   // price
   q: string   // quantity
+  m: boolean  // is buyer maker
   T: number   // trade time
 }
 
@@ -127,6 +129,9 @@ export function createBinanceWS(options: BinanceWSOptions): { connect: () => voi
       const result = parsePrice(data)
       if (result && Number.isFinite(result.price)) {
         options.onPrice(result.price, result.timestamp)
+        if (data.e === 'aggTrade') {
+          options.onTrade?.(result.price, parseFloat(data.q), data.m, data.T)
+        }
       }
     }
 

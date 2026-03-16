@@ -124,6 +124,28 @@ const ValueStrategySchema = v.object({
   minProfitTarget: v.optional(v.pipe(v.number(), v.minValue(1)), 2),
 })
 
+const CvdDivergenceSchema = v.object({
+  enabled: v.optional(v.boolean(), false),
+  /** CVD lookback window in seconds */
+  windowSec: v.optional(v.pipe(v.number(), v.minValue(30)), 180),
+  /** Min BTC price drop ($) for divergence signal */
+  divPriceThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 50),
+  /** Min CVD (BTC volume) for divergence signal */
+  divCvdThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 10),
+  /** Min BTC price move ($) for strong trend signal */
+  strongPriceThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 80),
+  /** Min CVD (BTC volume) for strong trend signal */
+  strongCvdThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 20),
+  /** Min edge (FV - market) to enter */
+  minEdge: v.optional(v.pipe(v.number(), v.minValue(0)), 0.05),
+  /** Max ticks to buffer (memory guard) */
+  maxTicks: v.optional(v.pipe(v.number(), v.minValue(1000)), 500_000),
+  /** Stink bid pullback: limit order at this % below current bid */
+  pullbackPct: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.30),
+  /** USD per CVD position (overrides risk.positionSizeUsdc for CVD trades) */
+  positionSizeUsdc: v.optional(v.pipe(v.number(), v.minValue(0.01)), 2.50),
+})
+
 const RiskSchema = v.object({
   /** Fixed USDC per trade */
   positionSizeUsdc: v.optional(v.pipe(v.number(), v.minValue(0.01)), 2.5),
@@ -163,6 +185,7 @@ export const ConfigSchema = v.object({
     microstructure: v.optional(MicrostructureSchema, {}),
     fairValueArb: v.optional(FairValueArbSchema, {}),
     value: v.optional(ValueStrategySchema, {}),
+    cvdDivergence: v.optional(CvdDivergenceSchema, {}),
   }), {}),
   timeFilter: v.optional(TimeFilterSchema, {}),
   risk: v.optional(RiskSchema, {}),
@@ -182,5 +205,6 @@ export type LowVolRiderConfig = v.InferOutput<typeof LowVolRiderSchema>
 export type MicrostructureConfig = v.InferOutput<typeof MicrostructureSchema>
 export type FairValueArbConfig = v.InferOutput<typeof FairValueArbSchema>
 export type ValueConfig = v.InferOutput<typeof ValueStrategySchema>
+export type CvdDivergenceConfig = v.InferOutput<typeof CvdDivergenceSchema>
 export type RiskConfig = v.InferOutput<typeof RiskSchema>
 export type TickSize = '0.1' | '0.01' | '0.001' | '0.0001'
