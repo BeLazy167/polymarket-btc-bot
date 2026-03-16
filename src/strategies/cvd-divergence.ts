@@ -93,19 +93,17 @@ export class CvdDivergenceStrategy implements Strategy {
 
     if (!signalType || !side) return null
 
-    // 6. Compute edge
+    // Only trade when CVD and FV model agree
     const fv = side === 'YES' ? ctx.fairValueUp : ctx.fairValueDown
     const marketPrice = side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice
     const edge = fv - marketPrice
 
-    stdout(`${color.magenta('[CVD SIGNAL]')} ${color.bold(signalType)} ${side} cvd=${cvd.toFixed(2)} Δprice=$${priceChange.toFixed(0)} fv=${fv.toFixed(2)} market=${marketPrice.toFixed(2)} edge=${edge.toFixed(3)}`)
-
     if (edge < this.config.minEdge) {
-      stdout(`${color.dim('[CVD]')} signal rejected — edge ${edge.toFixed(3)} < min ${this.config.minEdge}`)
+      stdout(`${color.dim('[CVD]')} ${signalType} ${side} — model disagrees (fv=${fv.toFixed(2)} market=${marketPrice.toFixed(2)} edge=${edge.toFixed(3)}), skipping`)
       return null
     }
 
-    stdout(`${color.green('[CVD FIRE]')} ${color.bold(signalType)} ${side} edge=${edge.toFixed(3)}`)
+    stdout(`${color.green('[CVD FIRE]')} ${color.bold(signalType)} ${side} cvd=${cvd.toFixed(2)} Δprice=$${priceChange.toFixed(0)} fv=${fv.toFixed(2)} market=${marketPrice.toFixed(2)} edge=${edge.toFixed(3)}`)
     return { side, confidence: fv, edge, strategy: signalType }
   }
 }
