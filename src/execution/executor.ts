@@ -27,6 +27,7 @@ export interface ExecutionResult {
 
 export interface Executor {
   execute(order: ApprovedOrder, market: MarketConfig): Promise<ExecutionResult>
+  executeStinkBid(order: ApprovedOrder, market: MarketConfig, windowEndMs: number): Promise<ExecutionResult>
   sell(tokenId: string, shares: number, tickSize: TickSize, negRisk?: boolean, bestBid?: number, urgent?: boolean): Promise<ExecutionResult>
 }
 
@@ -150,6 +151,92 @@ export class LiveExecutor implements Executor {
       const msg = err instanceof Error ? err.message : String(err)
       logger.error({ err, market: market.name, msg, orderId: trackedOrderId }, 'GTC buy threw')
       return { success: false, error: msg, orderId: trackedOrderId }
+    }
+  }
+
+  /**
+   * Place a stink bid (GTC limit order) and keep it open until filled or 60s before window end.
+   * Polls every 10s with heartbeats. Matches MoonDev's CVD bot timing.
+   */
+  async executeStinkBid(order: ApprovedOrder, market: MarketConfig, windowEndMs: number): Promise<ExecutionResult> {
+    const MIN_TIME_LEFT = 60_000
+    const POLL_INTERVAL = 10_000
+    const tokenId = order.side === 'YES' ? market.yesTokenId : market.noTokenId
+    const shares = (market.minOrderSize ?? 5) + 1
+    const price = Math.round(Math.min(order.price, 0.97) * 100) / 100
+
+    logger.info({ strategy: order.strategy, side: order.side, price, shares, market: market.name }, 'Placing stink bid')
+
+    const preFillBalance = await this.getTokenBalance(tokenId)
+
+    let heartbeatId: string | undefined
+    const sendHeartbeat = async () => {
+      try {
+        const resp = await this.client.postHeartbeat(heartbeatId ?? undefined)
+        heartbeatId = resp.heartbeat_id
+      } catch (err) { logger.warn({ err, market: market.name }, 'Stink bid heartbeat failed') }
+    }
+
+    await sendHeartbeat()
+
+    try {
+      const resp: OrderApiResponse = await this.client.createAndPostOrder(
+        { tokenID: tokenId, price, size: shares, side: PolySide.BUY },
+        { tickSize: market.tickSize as TickSize, negRisk: market.negRisk },
+        OrderType.GTC,
+      )
+
+      const ok = resp.success !== false && !resp.errorMsg
+      logger.info({ orderID: resp.orderID, status: resp.status, errorMsg: resp.errorMsg, ok }, 'Stink bid response')
+
+      if (!ok) {
+        return { success: false, status: resp.status, error: resp.errorMsg || 'Stink bid rejected', filledShares: 0 }
+      }
+
+      // Instant match
+      if (resp.status === 'matched' && resp.orderID) {
+        const raw = Number(resp.takingAmount)
+        const matched = Number.isFinite(raw) && raw > 0 ? raw : shares
+        logger.info({ filledShares: matched, fillPrice: price }, 'Stink bid instant match')
+        await this.waitForBalanceSettlement(tokenId, matched, preFillBalance)
+        return { success: true, orderId: resp.orderID, status: 'matched', filledShares: matched, fillPrice: price }
+      }
+
+      const orderId = resp.orderID
+      if (!orderId) {
+        return { success: false, error: 'No orderID returned', filledShares: 0 }
+      }
+
+      // Poll every 10s until 60s before window end
+      while (true) {
+        const timeLeft = windowEndMs - Date.now()
+        if (timeLeft < MIN_TIME_LEFT) {
+          logger.info({ orderId, timeLeft: Math.round(timeLeft / 1000) }, 'Stink bid cancelled — window ending')
+          try { await this.client.cancelOrder({ orderID: orderId }) } catch {}
+          return { success: false, orderId, status: 'cancelled', error: 'Window ending', filledShares: 0 }
+        }
+
+        await Bun.sleep(POLL_INTERVAL)
+        await sendHeartbeat()
+
+        try {
+          const o = await this.client.getOrder(orderId)
+          const matched = Number(o.size_matched) || 0
+          logger.debug({ orderId, matched, status: o.status, timeLeft: Math.round(timeLeft / 1000) }, 'Stink bid poll')
+
+          if (matched >= shares || (o.status === 'matched' && matched > 0)) {
+            logger.info({ filledShares: matched, fillPrice: price }, 'Stink bid filled!')
+            await this.waitForBalanceSettlement(tokenId, matched, preFillBalance)
+            return { success: true, orderId, status: 'filled', filledShares: matched, fillPrice: price }
+          }
+        } catch (pollErr) {
+          logger.warn({ err: pollErr, orderId }, 'Stink bid poll failed')
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error({ err, market: market.name }, 'Stink bid threw')
+      return { success: false, error: msg }
     }
   }
 

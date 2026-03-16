@@ -37,6 +37,10 @@ export class PaperExecutor implements Executor {
     }
   }
 
+  async executeStinkBid(order: ApprovedOrder, market: MarketConfig, _windowEndMs: number): Promise<ExecutionResult> {
+    return this.execute(order, market)
+  }
+
   async sell(tokenId: string, shares: number, _tickSize: TickSize, _negRisk?: boolean, _bestBid?: number, _urgent?: boolean): Promise<ExecutionResult> {
     logger.info({ tokenId, shares, side: 'SELL', mode: 'PAPER' }, 'Paper SELL executed')
     return { success: true, orderId: `paper-sell-${Date.now()}`, status: 'simulated', filledShares: shares, remaining: 0 }

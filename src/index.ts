@@ -650,7 +650,9 @@ async function main() {
         buyingInProgress.add(windowKey)
 
         try {
-          const result = await executor.execute(approved, marketConfig)
+          const result = signal.strategy.startsWith('cvd-')
+            ? await executor.executeStinkBid(approved, marketConfig, currentMarket.windowEndMs)
+            : await executor.execute(approved, marketConfig)
 
           if (result.success) {
             const actualShares = result.filledShares ?? (currentMarket.minOrderSize ?? 5)
