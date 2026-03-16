@@ -564,9 +564,6 @@ async function main() {
         return // already have a position (or just exited), skip new entries this tick
       }
 
-      // Skip new entries on fat-tails models — only trade on [C]
-      if (modelTag !== 'C') return
-
       // Skip new entries when paused via Telegram
       if (alerts.isPaused()) return
 
