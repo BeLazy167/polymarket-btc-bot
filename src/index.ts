@@ -195,7 +195,7 @@ async function main() {
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
-      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 10
+      const cooldownSec = 30
       stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
 
       // Redeem any resolved positions during cooldown (winning tokens → USDC.e, gasless via relayer)
@@ -216,8 +216,13 @@ async function main() {
 
       await Bun.sleep(cooldownSec * 1_000)
 
-      // Fetch ref price AFTER cooldown so API has settled
-      const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+      // Fetch ref price AFTER cooldown, retry once after 5s if it seems stale
+      let refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+      if (refPrice) {
+        await Bun.sleep(5_000)
+        const refPrice2 = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+        if (refPrice2) refPrice = refPrice2
+      }
 
       if (!refPrice) {
         stdout(`${tag.warn} Ref price unavailable — skipping window`)
