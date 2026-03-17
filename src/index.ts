@@ -195,7 +195,7 @@ async function main() {
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
-      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
+      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 10
       stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
 
       // Redeem any resolved positions during cooldown (winning tokens → USDC.e, gasless via relayer)
