@@ -13,11 +13,13 @@ export async function loadConfig(path: string): Promise<Config> {
   const raw = parse(text)
 
   // Allow env var overrides for secrets
+  // CVD bot uses separate API keys (POLYMARKET_API_KEY_CVD etc) to avoid heartbeat conflicts
   if (!raw.polymarket) raw.polymarket = {}
+  const isCvdOnly = raw.strategies?.cvdDivergence?.enabled && !raw.strategies?.momentum?.enabled && !raw.strategies?.fairValueArb?.enabled
   raw.polymarket.privateKey = process.env.POLYMARKET_PRIVATE_KEY ?? raw.polymarket.privateKey
-  raw.polymarket.apiKey = process.env.POLYMARKET_API_KEY ?? raw.polymarket.apiKey
-  raw.polymarket.apiSecret = process.env.POLYMARKET_API_SECRET ?? raw.polymarket.apiSecret
-  raw.polymarket.apiPassphrase = process.env.POLYMARKET_API_PASSPHRASE ?? raw.polymarket.apiPassphrase
+  raw.polymarket.apiKey = (isCvdOnly ? process.env.POLYMARKET_API_KEY_CVD : undefined) ?? process.env.POLYMARKET_API_KEY ?? raw.polymarket.apiKey
+  raw.polymarket.apiSecret = (isCvdOnly ? process.env.POLYMARKET_API_SECRET_CVD : undefined) ?? process.env.POLYMARKET_API_SECRET ?? raw.polymarket.apiSecret
+  raw.polymarket.apiPassphrase = (isCvdOnly ? process.env.POLYMARKET_API_PASSPHRASE_CVD : undefined) ?? process.env.POLYMARKET_API_PASSPHRASE ?? raw.polymarket.apiPassphrase
   raw.polymarket.funderAddress = process.env.POLYMARKET_FUNDER_ADDRESS ?? raw.polymarket.funderAddress ?? ''
 
   if (raw.telegram) {
