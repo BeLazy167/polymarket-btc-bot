@@ -32,6 +32,12 @@ strategies:
   value:
     enabled: true
     minFairValue: 0.30
+  cvdDivergence:
+    enabled: true
+    windowSec: 180
+    divPriceThreshold: 50
+    divCvdThreshold: 10
+    pullbackPct: 0.30
 
 timeFilter:
   skipDays: []

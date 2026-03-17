@@ -1,6 +1,12 @@
+export interface PriceLevel { price: number; size: number }
+
 export interface OrderbookState {
   bestBid: number
   bestAsk: number
+  /** Top 5 bid levels (highest first) */
+  bidLevels: PriceLevel[]
+  /** Top 5 ask levels (lowest first) */
+  askLevels: PriceLevel[]
   lastUpdate: number
 }
 
@@ -76,29 +82,32 @@ export function createPolymarketWS(options: PolymarketWSOptions): {
     }
   }
 
-  /** Process initial snapshot — extract best bid/ask from full order book */
+  /** Process initial snapshot — extract best bid/ask + top 5 depth from full order book */
   function processSnapshot(msg: SnapshotMessage) {
     const prev = books.get(msg.asset_id)
 
-    let bestBid = prev?.bestBid ?? 0
-    if (msg.bids.length > 0) {
-      const parsed = Math.max(...msg.bids.map(b => parseFloat(b.price)))
-      if (Number.isFinite(parsed)) bestBid = parsed
-    }
+    const bidLevels: PriceLevel[] = msg.bids
+      .map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
+      .filter(l => Number.isFinite(l.price) && Number.isFinite(l.size))
+      .sort((a, b) => b.price - a.price)
+      .slice(0, 5)
 
-    let bestAsk = prev?.bestAsk ?? 0
-    if (msg.asks.length > 0) {
-      const parsed = Math.min(...msg.asks.map(a => parseFloat(a.price)))
-      if (Number.isFinite(parsed)) bestAsk = parsed
-    }
+    const askLevels: PriceLevel[] = msg.asks
+      .map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
+      .filter(l => Number.isFinite(l.price) && Number.isFinite(l.size))
+      .sort((a, b) => a.price - b.price)
+      .slice(0, 5)
+
+    const bestBid = bidLevels[0]?.price ?? prev?.bestBid ?? 0
+    const bestAsk = askLevels[0]?.price ?? prev?.bestAsk ?? 0
 
     const ts = parseInt(msg.timestamp, 10) || Date.now()
-    const state: OrderbookState = { bestBid, bestAsk, lastUpdate: ts }
+    const state: OrderbookState = { bestBid, bestAsk, bidLevels, askLevels, lastUpdate: ts }
     books.set(msg.asset_id, state)
     options.onUpdate(msg.asset_id, state)
   }
 
-  /** Process price_changes update — use best_bid/best_ask directly */
+  /** Process price_changes update — use best_bid/best_ask directly, preserve depth from last snapshot */
   function processPriceChange(change: PriceChange) {
     const prev = books.get(change.asset_id)
     const bestBid = parseFloat(change.best_bid)
@@ -107,6 +116,8 @@ export function createPolymarketWS(options: PolymarketWSOptions): {
     const state: OrderbookState = {
       bestBid: Number.isFinite(bestBid) ? bestBid : (prev?.bestBid ?? 0),
       bestAsk: Number.isFinite(bestAsk) ? bestAsk : (prev?.bestAsk ?? 0),
+      bidLevels: prev?.bidLevels ?? [],
+      askLevels: prev?.askLevels ?? [],
       lastUpdate: Date.now(),
     }
     books.set(change.asset_id, state)

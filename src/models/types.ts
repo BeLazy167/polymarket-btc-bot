@@ -26,4 +26,16 @@ export interface StrategyContext {
   marketNoPrice: number
   windowDurationSec: number
   elapsedSec: number
+  /** Total size on top 5 YES bid levels */
+  yesBidDepth: number
+  /** Total size on top 5 YES ask levels */
+  yesAskDepth: number
+  /** Total size on top 5 NO bid levels */
+  noBidDepth: number
+  /** Total size on top 5 NO ask levels */
+  noAskDepth: number
+  /** Current YES spread (ask - bid) */
+  yesSpread: number
+  /** Current NO spread (ask - bid) */
+  noSpread: number
 }

@@ -11,12 +11,15 @@ import { ewmaVariance, garchVariance } from './models/math.ts'
 import type { FairValueResult, StrategyContext, Signal } from './models/types.ts'
 import { MomentumStrategy } from './strategies/momentum.ts'
 import { LowVolRiderStrategy } from './strategies/low-vol-rider.ts'
+import { MicrostructureStrategy } from './strategies/microstructure.ts'
 import { FairValueArbStrategy } from './strategies/fair-value-arb.ts'
 import { ValueStrategy } from './strategies/value.ts'
+import { CvdDivergenceStrategy } from './strategies/cvd-divergence.ts'
 import type { Strategy } from './strategies/base.ts'
 import { RiskManager } from './risk/manager.ts'
-import { LiveExecutor, type Executor } from './execution/executor.ts'
+import { LiveExecutor, type Executor, type ExecutionResult } from './execution/executor.ts'
 import { PaperExecutor } from './execution/paper.ts'
+import { redeemPositions } from './execution/redeem.ts'
 import { createAlerts } from './monitoring/alerts.ts'
 import { logger, stdout, color, banner, tag, progressBar, box } from './monitoring/logger.ts'
 
@@ -61,8 +64,11 @@ async function main() {
   const momentumStrategy = new MomentumStrategy(config.strategies.momentum)
   if (config.strategies.momentum.enabled) strategies.push(momentumStrategy)
   if (config.strategies.lowVolRider.enabled) strategies.push(new LowVolRiderStrategy(config.strategies.lowVolRider))
+  if (config.strategies.microstructure.enabled) strategies.push(new MicrostructureStrategy(config.strategies.microstructure))
   if (config.strategies.fairValueArb.enabled) strategies.push(new FairValueArbStrategy(config.strategies.fairValueArb))
   if (config.strategies.value.enabled) strategies.push(new ValueStrategy(config.strategies.value))
+  const cvdStrategy = new CvdDivergenceStrategy(config.strategies.cvdDivergence)
+  if (config.strategies.cvdDivergence.enabled) strategies.push(cvdStrategy)
 
   stdout(`${color.dim(box.arrow)} Strategies: ${color.bold(strategies.map(s => s.name).join(color.dim(' │ ')))}`)
 
@@ -86,19 +92,25 @@ async function main() {
   const orderbookStates = new Map<string, OrderbookState>()
 
   // --- Trade tracking for P&L ---
-  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; peakBid?: number; edge: number }
+  interface OpenTrade { side: 'YES' | 'NO'; entryPrice: number; sizeUsdc: number; refPrice: number; strategy: string; entryTime: number; sellFailures?: number; partialRevenue?: number; peakBid?: number; edge: number }
   const openTrades = new Map<string, OpenTrade>()
   const sellingInProgress = new Set<string>()
   const buyingInProgress = new Set<string>()
   const MAX_TRADES_PER_WINDOW = 2
   const windowTradeCount = new Map<string, number>()
+  /** Track which half (1 or 2) the last trade entered in */
+  const windowTradeHalf = new Map<string, number>()
   let tradeCount = 0
   let winCount = 0
   let lastTickLog = 0
   let refreshing = false
+  const pendingRedemptions = new Map<string, number>() // conditionId → retry count
 
   // --- Data feeds ---
   const binanceWS = createBinanceWS({
+    onTrade(price, qty, isBuyerMaker, ts) {
+      cvdStrategy.recordTick(price, qty, isBuyerMaker, ts)
+    },
     onPrice(price, timestamp) {
       lastPrice = price
       lastPriceTimestamp = Date.now()
@@ -179,11 +191,38 @@ async function main() {
         return
       }
 
-      // Re-subscribe Polymarket WS early so orderbook populates while we fetch open price
+      // Re-subscribe Polymarket WS early so orderbook populates during cooldown
       const newIds = [market.yesTokenId, market.noTokenId]
       polymarketWS.resubscribe(newIds)
 
-      const refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+      const cooldownSec = 30
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
+
+      // Redeem any resolved positions during cooldown (winning tokens → USDC.e, gasless via relayer)
+      if (config.mode === 'live' && pendingRedemptions.size > 0) {
+        const batch = [...pendingRedemptions.entries()]
+        pendingRedemptions.clear()
+        for (const [cid, retries] of batch) {
+          const result = await redeemPositions(config.polymarket, cid)
+          if (result.success) {
+            stdout(`${color.green(box.dot)} ${color.green('Redeemed')} ${color.dim(cid.slice(0, 10))}… tx ${color.cyan(result.txHash?.slice(0, 10) + '…')}`)
+          } else if (result.error !== 'not-resolved' && retries < 3) {
+            pendingRedemptions.set(cid, retries + 1)
+          } else if (retries >= 3) {
+            logger.warn({ conditionId: cid, retries }, 'Redemption abandoned after max retries')
+          }
+        }
+      }
+
+      await Bun.sleep(cooldownSec * 1_000)
+
+      // Fetch ref price AFTER cooldown, retry once after 5s if it seems stale
+      let refPrice = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+      if (refPrice) {
+        await Bun.sleep(5_000)
+        const refPrice2 = await fetchOpenPrice(market.epoch, WINDOW_SEC)
+        if (refPrice2) refPrice = refPrice2
+      }
 
       if (!refPrice) {
         stdout(`${tag.warn} Ref price unavailable — skipping window`)
@@ -191,9 +230,7 @@ async function main() {
         return
       }
 
-      const cooldownSec = WINDOW_SEC >= 900 ? 30 : 5
-      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))} ${color.dim('│')} cooldown ${color.yellow(cooldownSec + 's')}`)
-      await Bun.sleep(cooldownSec * 1_000)
+      stdout(`${tag.market} ${color.cyan(market.slug)} ${color.dim('ref')} ${color.bold('$' + refPrice.toFixed(2))}`)
 
       // Commit state AFTER sleep so tick loop won't trade during wait
       currentMarket = market
@@ -248,7 +285,7 @@ async function main() {
               const exitBid = exitBook?.bestBid ?? 0
               const soldShares = sellResult.filledShares ?? shares
               const exitPrice = sellResult.fillPrice ?? exitBid
-              const revenue = sellResult.revenue ?? soldShares * Math.max(exitBid, 0.01) * 0.98
+              const revenue = computeRevenue(sellResult.revenue, trade.partialRevenue ?? 0, soldShares, exitBid)
               const pnl = revenue - trade.sizeUsdc
 
               riskManager.recordTrade(MARKET_ID, pnl)
@@ -303,9 +340,13 @@ async function main() {
           }
         }
 
+        // Queue previous market for CTF redemption (resolves winning tokens → USDC.e)
+        if (currentMarket && !pendingRedemptions.has(currentMarket.conditionId)) pendingRedemptions.set(currentMarket.conditionId, 0)
+
         sellingInProgress.clear()
         buyingInProgress.clear()
         windowTradeCount.clear()
+        windowTradeHalf.clear()
         orderbookStates.clear()
         lastTickLog = 0
         if (!refreshing) await refreshMarket()
@@ -372,6 +413,12 @@ async function main() {
         marketNoPrice: noBook.bestAsk,
         windowDurationSec: WINDOW_SEC,
         elapsedSec: elapsed,
+        yesBidDepth: sumDepth(yesBook.bidLevels ?? []),
+        yesAskDepth: sumDepth(yesBook.askLevels ?? []),
+        noBidDepth: sumDepth(noBook.bidLevels ?? []),
+        noAskDepth: sumDepth(noBook.askLevels ?? []),
+        yesSpread: yesBook.bestAsk - yesBook.bestBid,
+        noSpread: noBook.bestAsk - noBook.bestBid,
       }
 
       // Compact tick log every 1s
@@ -398,7 +445,10 @@ async function main() {
 
       // --- Check exits for open positions ---
       const existingTrade = openTrades.get(windowKey)
-      if (existingTrade) {
+      // CVD trades hold to resolution — no early exits, skip to next tick
+      if (existingTrade && existingTrade.strategy.startsWith('cvd-')) {
+        return
+      } else if (existingTrade) {
         const exitBid = (existingTrade.side === 'YES' ? yesBook.bestBid : noBook.bestBid) ?? 0
         const fairValue = existingTrade.side === 'YES' ? fv.fairValueUp : fv.fairValueDown
         const arbCfg = config.strategies.fairValueArb
@@ -423,10 +473,18 @@ async function main() {
           exitReason = `TP 10¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
-        // Low-vol-rider: fixed 10¢ stop loss (no trailing stop — high conviction, hold to expiry)
-        if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider') && exitBid <= existingTrade.entryPrice - 0.10) {
+        // Fixed stop-loss: exit when bid drops stopLossCents below entry
+        if (!shouldExit && arbCfg.stopLossCents > 0 && exitBid > 0 && exitBid <= existingTrade.entryPrice - arbCfg.stopLossCents) {
           shouldExit = true
-          exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢ (-10¢)`
+          exitReason = `SL ${(arbCfg.stopLossCents * 100).toFixed(0)}¢: bid ${(exitBid * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
+        }
+
+        // Low-vol-rider SL: bid down 10¢ AND FV down 5¢ from entry (dual confirm — ignore transient book gaps)
+        if (!shouldExit && existingTrade.strategy.startsWith('low-vol-rider')
+            && exitBid <= existingTrade.entryPrice - 0.10
+            && Number.isFinite(fairValue) && fairValue < existingTrade.entryPrice - 0.05) {
+          shouldExit = true
+          exitReason = `rider SL: bid ${(exitBid * 100).toFixed(0)}¢, fv ${(fairValue * 100).toFixed(0)}¢, entry ${(existingTrade.entryPrice * 100).toFixed(0)}¢`
         }
 
         // Edge-relative trailing stop (not for low-vol-rider)
@@ -452,11 +510,15 @@ async function main() {
           const shares = existingTrade.sizeUsdc / existingTrade.entryPrice
           sellingInProgress.add(windowKey)
           try {
-            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, exitBid)
+            const isUrgent = exitReason.startsWith('SL ') || exitReason.startsWith('trailing stop') || exitReason.startsWith('TP') || exitReason.startsWith('emergency') || exitReason.startsWith('rider SL')
+            const sellResult = await executor.sell(tokenId, shares, currentMarket.tickSize as TickSize, currentMarket.negRisk, exitBid, isUrgent)
 
             if (!sellResult.success) {
               existingTrade.sellFailures = (existingTrade.sellFailures ?? 0) + 1
-              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures, remaining: sellResult.remaining }, 'Sell failed — retrying next tick')
+              if (sellResult.revenue && sellResult.revenue > 0) {
+                existingTrade.partialRevenue = (existingTrade.partialRevenue ?? 0) + sellResult.revenue
+              }
+              logger.warn({ result: sellResult, exitReason, attempt: existingTrade.sellFailures, remaining: sellResult.remaining, partialRevenue: existingTrade.partialRevenue }, 'Sell failed — retrying next tick')
               if (existingTrade.sellFailures % 3 === 0) {
                 alerts.sendSellFailureAlert({
                   side: existingTrade.side,
@@ -472,7 +534,7 @@ async function main() {
 
             const soldShares = sellResult.filledShares ?? shares
             const actualExitPrice = sellResult.fillPrice ?? exitBid
-            const revenue = sellResult.revenue ?? soldShares * exitBid * 0.98
+            const revenue = computeRevenue(sellResult.revenue, existingTrade.partialRevenue ?? 0, soldShares, exitBid)
             const pnl = revenue - existingTrade.sizeUsdc
 
             riskManager.recordTrade(MARKET_ID, pnl)
@@ -522,6 +584,17 @@ async function main() {
       // Skip new entries if max trades per window reached
       if ((windowTradeCount.get(windowKey) ?? 0) >= MAX_TRADES_PER_WINDOW) return
 
+      // Enforce one trade per half: if already traded in this half, skip
+      const currentHalf = elapsed < WINDOW_SEC / 2 ? 1 : 2
+      const lastHalf = windowTradeHalf.get(windowKey)
+      if (lastHalf === currentHalf) return
+
+      // No new entries in last 15s — not enough time to fill + sell
+      if (elapsed >= WINDOW_SEC - 15) {
+        logger.debug({ elapsed, cutoff: WINDOW_SEC - 15 }, 'Skipping entry — 15s cutoff')
+        return
+      }
+
       // Evaluate all strategies
       for (const strategy of strategies) {
         const signal = strategy instanceof MomentumStrategy
@@ -532,7 +605,17 @@ async function main() {
         const approved = riskManager.approve(signal, MARKET_ID)
         if (!approved) continue
 
-        const entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
+        let entryPrice = Math.round((signal.side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice) * 100) / 100
+
+        // Stink bid for CVD signals + CVD-specific sizing
+        if (signal.strategy.startsWith('cvd-')) {
+          const bid = signal.side === 'YES' ? (yesBook.bestBid ?? 0) : (noBook.bestBid ?? 0)
+          if (bid <= 0) continue
+          entryPrice = Math.round(bid * (1 - cvdStrategy.pullbackPct) * 100) / 100
+          if (entryPrice < 0.01) entryPrice = 0.01
+          approved.sizeUsdc = config.strategies.cvdDivergence.positionSizeUsdc
+        }
+
         approved.price = entryPrice
         approved.sigma = sigma
 
@@ -572,7 +655,33 @@ async function main() {
         buyingInProgress.add(windowKey)
 
         try {
-          const result = await executor.execute(approved, marketConfig)
+          let result: ExecutionResult
+          if (signal.strategy.startsWith('cvd-')) {
+            // Run stink bid in background — don't block tick loop
+            executor.executeStinkBid(approved, marketConfig, currentMarket.windowEndMs).then(r => {
+              if (r.success) {
+                const actualShares = r.filledShares ?? (currentMarket!.minOrderSize ?? 5)
+                const actualPrice = r.fillPrice ?? entryPrice
+                const trade = openTrades.get(windowKey)
+                if (trade) {
+                  trade.entryPrice = actualPrice
+                  trade.sizeUsdc = actualShares * actualPrice
+                }
+                riskManager.openPosition(MARKET_ID)
+                stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(actualPrice * 100).toFixed(0)}¢ ${color.dim('│')} stink bid filled ${color.dim('│')} ${color.dim(signal.strategy)}`)
+                alerts.sendEntryAlert({ strategy: signal.strategy, side: signal.side, entryPrice: actualPrice, edge: signal.edge, btcPrice: currentPrice, fillPrice: actualPrice }).catch(() => {})
+              } else {
+                openTrades.delete(windowKey)
+                stdout(`${color.dim('[CVD]')} stink bid expired: ${r.error ?? r.status}`)
+              }
+              buyingInProgress.delete(windowKey)
+            }).catch(() => {
+              openTrades.delete(windowKey)
+              buyingInProgress.delete(windowKey)
+            })
+            break // skip rest of strategies this tick — stink bid is running in background
+          }
+          result = await executor.execute(approved, marketConfig)
 
           if (result.success) {
             const actualShares = result.filledShares ?? (currentMarket.minOrderSize ?? 5)
@@ -585,6 +694,7 @@ async function main() {
 
             riskManager.openPosition(MARKET_ID)
             tradeCount++
+            windowTradeHalf.set(windowKey, elapsed < WINDOW_SEC / 2 ? 1 : 2)
 
             stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(actualPrice * 100).toFixed(0)}¢ ${color.yellow('t=' + Math.round(elapsed) + 's')} ${color.dim('│')} edge ${color.green((signal.edge * 100).toFixed(1) + '¢')} ${color.dim('│')} ${color.dim(signal.strategy)} ${color.dim('│')} BTC ${color.bold('$' + currentPrice.toFixed(0))} ${color.dim('│')} ${color.cyan(actualShares.toFixed(1) + ' shares')} ${color.dim('$' + (actualShares * actualPrice).toFixed(2))}`)
 
@@ -649,6 +759,16 @@ async function main() {
 }
 
 // --- Helpers ---
+
+function sumDepth(levels: Array<{ size: number }>): number {
+  return levels.reduce((s, l) => s + l.size, 0)
+}
+
+/** Compute sell revenue: prefer CLOB data + partial, fall back to estimated. */
+function computeRevenue(sellRevenue: number | undefined, partialRevenue: number, soldShares: number, exitBid: number): number {
+  if (sellRevenue !== undefined) return partialRevenue + sellRevenue
+  return soldShares * Math.max(exitBid, 0.01) * 0.98
+}
 
 function fmtPnl(pnl: number): string {
   return pnl >= 0 ? color.green(`+$${pnl.toFixed(2)}`) : color.red(`-$${Math.abs(pnl).toFixed(2)}`)

@@ -61,13 +61,31 @@ const TimeFilterSchema = v.object({
 const LowVolRiderSchema = v.object({
   enabled: v.optional(v.boolean(), true),
   /** Activate in last N seconds of window */
-  activateLastSec: v.optional(v.pipe(v.number(), v.minValue(1)), 60),
+  activateLastSec: v.optional(v.pipe(v.number(), v.minValue(1)), 30),
   /** Min sigma gap for "reversal impossible" */
-  minSigmaGap: v.optional(v.pipe(v.number(), v.minValue(1)), 3),
+  minSigmaGap: v.optional(v.pipe(v.number(), v.minValue(1)), 4),
   /** Min fair value to enter (e.g., 0.90) */
   minFairValue: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.90),
   /** Max entry price on Polymarket */
-  maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.85),
+  maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.88),
+  /** Min edge (fv - marketPrice) to enter */
+  minEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.03),
+})
+
+const MicrostructureSchema = v.object({
+  enabled: v.optional(v.boolean(), true),
+  /** Imbalance: activate in last N seconds */
+  imbalanceActiveSec: v.optional(v.pipe(v.number(), v.minValue(1)), 120),
+  /** Imbalance: min bid/ask depth ratio to trigger */
+  minDepthRatio: v.optional(v.pipe(v.number(), v.minValue(1)), 3),
+  /** Imbalance: min edge (fv - market) to enter */
+  minImbalanceEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.05),
+  /** Liquidity gap: activate in last N seconds */
+  gapActiveSec: v.optional(v.pipe(v.number(), v.minValue(1)), 45),
+  /** Liquidity gap: min spread to detect MM withdrawal */
+  minSpreadForGap: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.08),
+  /** Liquidity gap: min edge to enter */
+  minGapEdge: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.5)), 0.03),
 })
 
 const FairValueArbSchema = v.object({
@@ -88,6 +106,8 @@ const FairValueArbSchema = v.object({
   trailingStopCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.05),
   /** Trailing stop activates after bid is this far above entry (e.g., 0.07 = 7¢) */
   trailingActivationCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.07),
+  /** Fixed stop-loss: exit when bid <= entry - this amount (e.g., 0.15 = 15¢). 0 = disabled */
+  stopLossCents: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(0.50)), 0.08),
 })
 
 const ValueStrategySchema = v.object({
@@ -102,6 +122,28 @@ const ValueStrategySchema = v.object({
   maxEntryPrice: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.10),
   /** Target profit multiplier (e.g., 2 = sell at 2x entry) */
   minProfitTarget: v.optional(v.pipe(v.number(), v.minValue(1)), 2),
+})
+
+const CvdDivergenceSchema = v.object({
+  enabled: v.optional(v.boolean(), false),
+  /** CVD lookback window in seconds */
+  windowSec: v.optional(v.pipe(v.number(), v.minValue(30)), 180),
+  /** Min BTC price drop ($) for divergence signal */
+  divPriceThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 50),
+  /** Min CVD (BTC volume) for divergence signal */
+  divCvdThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 10),
+  /** Min BTC price move ($) for strong trend signal */
+  strongPriceThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 80),
+  /** Min CVD (BTC volume) for strong trend signal */
+  strongCvdThreshold: v.optional(v.pipe(v.number(), v.minValue(0)), 20),
+  /** Min edge (FV - market) to enter */
+  minEdge: v.optional(v.pipe(v.number(), v.minValue(0)), 0.05),
+  /** Max ticks to buffer (memory guard) */
+  maxTicks: v.optional(v.pipe(v.number(), v.minValue(1000)), 500_000),
+  /** Stink bid pullback: limit order at this % below current bid */
+  pullbackPct: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(1)), 0.30),
+  /** USD per CVD position (overrides risk.positionSizeUsdc for CVD trades) */
+  positionSizeUsdc: v.optional(v.pipe(v.number(), v.minValue(0.01)), 2.50),
 })
 
 const RiskSchema = v.object({
@@ -140,8 +182,10 @@ export const ConfigSchema = v.object({
   strategies: v.optional(v.object({
     momentum: v.optional(MomentumStrategySchema, {}),
     lowVolRider: v.optional(LowVolRiderSchema, {}),
+    microstructure: v.optional(MicrostructureSchema, {}),
     fairValueArb: v.optional(FairValueArbSchema, {}),
     value: v.optional(ValueStrategySchema, {}),
+    cvdDivergence: v.optional(CvdDivergenceSchema, {}),
   }), {}),
   timeFilter: v.optional(TimeFilterSchema, {}),
   risk: v.optional(RiskSchema, {}),
@@ -158,7 +202,9 @@ export type MarketConfig = v.InferOutput<typeof MarketSchema>
 export type ModelConfig = v.InferOutput<typeof ModelConfigSchema>
 export type MomentumConfig = v.InferOutput<typeof MomentumStrategySchema>
 export type LowVolRiderConfig = v.InferOutput<typeof LowVolRiderSchema>
+export type MicrostructureConfig = v.InferOutput<typeof MicrostructureSchema>
 export type FairValueArbConfig = v.InferOutput<typeof FairValueArbSchema>
 export type ValueConfig = v.InferOutput<typeof ValueStrategySchema>
+export type CvdDivergenceConfig = v.InferOutput<typeof CvdDivergenceSchema>
 export type RiskConfig = v.InferOutput<typeof RiskSchema>
 export type TickSize = '0.1' | '0.01' | '0.001' | '0.0001'
