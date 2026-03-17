@@ -1,7 +1,7 @@
 import { Wallet } from '@ethersproject/wallet'
 import { JsonRpcProvider } from '@ethersproject/providers'
 
-const POLYGON_RPC = process.env.POLYGON_RPC_URL ?? 'https://polygon.drpc.org'
+const POLYGON_RPC = process.env.POLYGON_RPC_URL ?? 'https://polygon-bor-rpc.publicnode.com'
 import { Interface } from '@ethersproject/abi'
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client'
 import { BuilderConfig } from '@polymarket/builder-signing-sdk'
