@@ -229,6 +229,10 @@ export class LiveExecutor implements Executor {
             await this.waitForBalanceSettlement(tokenId, matched, preFillBalance)
             return { success: true, orderId, status: 'filled', filledShares: matched, fillPrice: price }
           }
+          if (o.status === 'CANCELED') {
+            logger.info({ orderId }, 'Stink bid was cancelled by exchange')
+            return { success: false, orderId, status: 'cancelled', error: 'Order cancelled by exchange', filledShares: 0 }
+          }
         } catch (pollErr) {
           logger.warn({ err: pollErr, orderId }, 'Stink bid poll failed')
         }
