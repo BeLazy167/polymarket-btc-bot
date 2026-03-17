@@ -17,7 +17,7 @@ import { ValueStrategy } from './strategies/value.ts'
 import { CvdDivergenceStrategy } from './strategies/cvd-divergence.ts'
 import type { Strategy } from './strategies/base.ts'
 import { RiskManager } from './risk/manager.ts'
-import { LiveExecutor, type Executor } from './execution/executor.ts'
+import { LiveExecutor, type Executor, type ExecutionResult } from './execution/executor.ts'
 import { PaperExecutor } from './execution/paper.ts'
 import { redeemPositions } from './execution/redeem.ts'
 import { createAlerts } from './monitoring/alerts.ts'
@@ -650,9 +650,33 @@ async function main() {
         buyingInProgress.add(windowKey)
 
         try {
-          const result = signal.strategy.startsWith('cvd-')
-            ? await executor.executeStinkBid(approved, marketConfig, currentMarket.windowEndMs)
-            : await executor.execute(approved, marketConfig)
+          let result: ExecutionResult
+          if (signal.strategy.startsWith('cvd-')) {
+            // Run stink bid in background — don't block tick loop
+            executor.executeStinkBid(approved, marketConfig, currentMarket.windowEndMs).then(r => {
+              if (r.success) {
+                const actualShares = r.filledShares ?? (currentMarket!.minOrderSize ?? 5)
+                const actualPrice = r.fillPrice ?? entryPrice
+                const trade = openTrades.get(windowKey)
+                if (trade) {
+                  trade.entryPrice = actualPrice
+                  trade.sizeUsdc = actualShares * actualPrice
+                }
+                riskManager.openPosition(MARKET_ID)
+                stdout(`${tag.trade} ${color.bold(signal.side)} @ ${(actualPrice * 100).toFixed(0)}¢ ${color.dim('│')} stink bid filled ${color.dim('│')} ${color.dim(signal.strategy)}`)
+                alerts.sendEntryAlert({ strategy: signal.strategy, side: signal.side, entryPrice: actualPrice, edge: signal.edge, btcPrice: currentPrice, fillPrice: actualPrice }).catch(() => {})
+              } else {
+                openTrades.delete(windowKey)
+                stdout(`${color.dim('[CVD]')} stink bid expired: ${r.error ?? r.status}`)
+              }
+              buyingInProgress.delete(windowKey)
+            }).catch(() => {
+              openTrades.delete(windowKey)
+              buyingInProgress.delete(windowKey)
+            })
+            break // skip rest of strategies this tick — stink bid is running in background
+          }
+          result = await executor.execute(approved, marketConfig)
 
           if (result.success) {
             const actualShares = result.filledShares ?? (currentMarket.minOrderSize ?? 5)

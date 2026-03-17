@@ -35,8 +35,12 @@ export class CvdDivergenceStrategy implements Strategy {
   }
 
   private lastLogTs = 0
+  private lastSignalWindow = ''
 
   evaluate(ctx: StrategyContext): Signal | null {
+    // Only fire once per window
+    const windowKey = `${ctx.windowDurationSec}-${Math.floor(Date.now() / 1000 / ctx.windowDurationSec)}`
+    if (this.lastSignalWindow === windowKey) return null
     // 1. Prune ticks older than windowSec
     const cutoff = Date.now() - this.config.windowSec * 1000
     this.ticks = this.ticks.filter(t => t.ts >= cutoff)
@@ -96,6 +100,7 @@ export class CvdDivergenceStrategy implements Strategy {
     const marketPrice = side === 'YES' ? ctx.marketYesPrice : ctx.marketNoPrice
     const strength = Math.abs(cvd) / this.config.divCvdThreshold
 
+    this.lastSignalWindow = windowKey
     stdout(`${color.green('[CVD FIRE]')} ${color.bold(signalType)} ${side} cvd=${cvd.toFixed(2)} Δprice=$${priceChange.toFixed(0)} market=${marketPrice.toFixed(2)} strength=${strength.toFixed(1)}x`)
     return { side, confidence: 1, edge: strength * 0.1, strategy: signalType }
   }
