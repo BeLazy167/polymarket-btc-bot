@@ -1,4 +1,7 @@
 import { Wallet } from '@ethersproject/wallet'
+import { JsonRpcProvider } from '@ethersproject/providers'
+
+const POLYGON_RPC = 'https://polygon-rpc.com'
 import { Interface } from '@ethersproject/abi'
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client'
 import { BuilderConfig } from '@polymarket/builder-signing-sdk'
@@ -29,7 +32,8 @@ interface RedeemCreds {
  */
 export async function redeemPositions(cfg: RedeemCreds, conditionId: string): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
-    const wallet = new Wallet(cfg.privateKey)
+    const provider = new JsonRpcProvider(POLYGON_RPC)
+    const wallet = new Wallet(cfg.privateKey, provider)
     const builderConfig = new BuilderConfig({
       localBuilderCreds: { key: cfg.apiKey, secret: cfg.apiSecret, passphrase: cfg.apiPassphrase },
     })
