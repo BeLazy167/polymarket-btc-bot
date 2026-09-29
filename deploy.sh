@@ -6,7 +6,7 @@ curl -fsSL https://bun.sh/install | bash
 source ~/.bashrc
 
 echo "=== Cloning repo ==="
-git clone https://github.com/belazy/polymarket-btc-bot.git ~/bot
+git clone https://github.com/BeLazy167/polymarket-btc-bot.git ~/bot
 cd ~/bot
 
 echo "=== Installing deps ==="

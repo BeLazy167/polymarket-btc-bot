@@ -32,3 +32,18 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# local run config (keep config.example.yaml tracked instead)
+config.yaml
+config-*.yaml
+
+# agent/editor session state and runtime output
+.serena/
+.cursor/
+.claude/
+data/
+*.sqlite
+*.sqlite3
+*.db
+bot.log
+nohup.out
